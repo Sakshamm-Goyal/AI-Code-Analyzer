@@ -1,83 +1,179 @@
-import type { Metadata } from "next"
+"use client"
+
+import { useState, useEffect } from "react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { GitBranch, GitFork, Star, AlertCircle, AlertTriangle, CheckCircle } from "lucide-react"
-
-export const metadata: Metadata = {
-  title: "Repositories - CodeScan AI",
-  description: "Manage your connected repositories",
-}
-
-// Mock repository data
-const repositories = [
-  {
-    id: "repo-1",
-    name: "frontend-app",
-    description: "React frontend application",
-    url: "https://github.com/username/frontend-app",
-    stars: 24,
-    forks: 5,
-    lastScan: "2023-06-10T09:00:00",
-    issues: {
-      high: 2,
-      medium: 5,
-      low: 8,
-    },
-  },
-  {
-    id: "repo-2",
-    name: "backend-api",
-    description: "Node.js backend API",
-    url: "https://github.com/username/backend-api",
-    stars: 18,
-    forks: 3,
-    lastScan: "2023-06-09T14:30:00",
-    issues: {
-      high: 0,
-      medium: 3,
-      low: 12,
-    },
-  },
-  {
-    id: "repo-3",
-    name: "mobile-app",
-    description: "React Native mobile application",
-    url: "https://github.com/username/mobile-app",
-    stars: 32,
-    forks: 7,
-    lastScan: "2023-06-08T11:15:00",
-    issues: {
-      high: 1,
-      medium: 7,
-      low: 4,
-    },
-  },
-]
+import { GitBranch, GitFork, Star, AlertCircle, AlertTriangle, CheckCircle, Loader2 } from "lucide-react"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { connectRepository } from "@/lib/github"
+import { useToast } from "@/components/ui/use-toast"
+import { useSearchParams } from "next/navigation"
+import { GitHubAuthState } from "@/components/github-auth-state"
 
 export default function RepositoriesPage() {
+  const [repositories, setRepositories] = useState<any[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [isDialogOpen, setIsDialogOpen] = useState(false)
+  const [repoUrl, setRepoUrl] = useState("")
+  const [isConnecting, setIsConnecting] = useState(false)
+  const [isScanning, setIsScanning] = useState<Record<number, boolean>>({})
+  const { toast } = useToast()
+  const searchParams = useSearchParams()
+
+  useEffect(() => {
+    fetchRepositories()
+  }, [])
+
+  const fetchRepositories = async () => {
+    setIsLoading(true)
+    setError(null)
+    
+    try {
+      const response = await fetch("/api/github/repositories")
+      
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || "Failed to fetch repositories")
+      }
+      
+      const data = await response.json()
+      setRepositories(data.repositories || [])
+    } catch (error) {
+      console.error("Error fetching repositories:", error)
+      setError(error instanceof Error ? error.message : "Failed to fetch repositories")
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const handleConnectRepository = async () => {
+    setIsConnecting(true)
+    try {
+      const repository = await connectRepository(repoUrl)
+      setRepositories(prev => [...prev, repository])
+      setRepoUrl("")
+      setIsDialogOpen(false)
+      toast({
+        title: "Success",
+        description: "Repository connected successfully",
+      })
+    } catch (error) {
+      console.error("Error connecting repository:", error)
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to connect repository",
+        variant: "destructive",
+      })
+    } finally {
+      setIsConnecting(false)
+    }
+  }
+
+  const handleScanNow = async (repoId: number) => {
+    setIsScanning(prev => ({ ...prev, [repoId]: true }))
+    
+    try {
+      const response = await fetch(`/api/github/repositories/${repoId}/scan`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+      })
+      
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || "Failed to initiate scan")
+      }
+      
+      toast({
+        title: "Scan initiated",
+        description: "The repository scan has been started.",
+      })
+      
+      // Refresh repositories to show updated scan status
+      await fetchRepositories()
+    } catch (error) {
+      console.error("Error scanning repository:", error)
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to scan repository",
+        variant: "destructive",
+      })
+    } finally {
+      setIsScanning(prev => ({ ...prev, [repoId]: false }))
+    }
+  }
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-[400px]">
+        <Loader2 className="h-8 w-8 animate-spin" />
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center justify-between">
+      <GitHubAuthState />
+      
+      <div className="flex items-center justify-between">
+        <div>
           <h1 className="text-3xl font-bold tracking-tight">Repositories</h1>
-          <Button>Connect Repository</Button>
+          <p className="text-muted-foreground">
+            Manage and analyze your GitHub repositories
+          </p>
         </div>
-        <p className="text-muted-foreground">Manage your connected GitHub repositories</p>
+        <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+          <DialogTrigger asChild>
+            <Button>Connect Repository</Button>
+          </DialogTrigger>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Connect Repository</DialogTitle>
+              <DialogDescription>
+                Enter the URL of the GitHub repository you want to connect.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-4 py-4">
+              <Input
+                placeholder="https://github.com/owner/repo"
+                value={repoUrl}
+                onChange={(e) => setRepoUrl(e.target.value)}
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                onClick={handleConnectRepository}
+                disabled={!repoUrl || isConnecting}
+              >
+                {isConnecting ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Connecting...
+                  </>
+                ) : (
+                  'Connect'
+                )}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         {repositories.map((repo) => (
           <Card key={repo.id}>
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-xl">
-                  <Link href={`/dashboard/repositories/${repo.id}`} className="hover:underline">
-                    {repo.name}
-                  </Link>
-                </CardTitle>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <CardHeader>
+              <CardTitle>{repo.name}</CardTitle>
+              <CardDescription>{repo.description}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-4">
                   <div className="flex items-center gap-1">
                     <Star className="h-4 w-4" />
                     <span>{repo.stars}</span>
@@ -86,40 +182,32 @@ export default function RepositoriesPage() {
                     <GitFork className="h-4 w-4" />
                     <span>{repo.forks}</span>
                   </div>
+                  <div className="flex items-center gap-1">
+                    <GitBranch className="h-4 w-4" />
+                    <span>{repo.defaultBranch}</span>
+                  </div>
                 </div>
               </div>
-              <CardDescription>{repo.description}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <GitBranch className="h-4 w-4" />
-                  <span>Last scanned: {new Date(repo.lastScan).toLocaleDateString()}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="flex items-center gap-1">
-                    <AlertCircle className="h-4 w-4 text-destructive" />
-                    <Badge variant={repo.issues.high > 0 ? "destructive" : "outline"}>{repo.issues.high}</Badge>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <AlertTriangle className="h-4 w-4 text-amber-500" />
-                    <Badge variant="warning" className="bg-amber-500 hover:bg-amber-600">
-                      {repo.issues.medium}
-                    </Badge>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <CheckCircle className="h-4 w-4 text-green-500" />
-                    <Badge variant="secondary">{repo.issues.low}</Badge>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Button size="sm" variant="outline" asChild>
-                    <Link href={`/dashboard/repositories/${repo.id}`}>View Details</Link>
-                  </Button>
-                  <Button size="sm" variant="outline">
-                    Scan Now
-                  </Button>
-                </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="secondary"
+                  onClick={() => handleScanNow(repo.id)}
+                  disabled={isScanning[repo.id]}
+                >
+                  {isScanning[repo.id] ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Scanning...
+                    </>
+                  ) : (
+                    'Scan Now'
+                  )}
+                </Button>
+                <Button variant="outline" asChild>
+                  <Link href={`/dashboard/repositories/${repo.id}`}>
+                    View Details
+                  </Link>
+                </Button>
               </div>
             </CardContent>
           </Card>

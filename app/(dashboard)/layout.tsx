@@ -1,6 +1,5 @@
 import type React from "react"
 import { AppSidebar } from "@/components/app-sidebar"
-import { SidebarInset } from "@/components/ui/sidebar"
 
 export default function DashboardLayout({
   children,
@@ -10,7 +9,7 @@ export default function DashboardLayout({
   return (
     <div className="flex min-h-screen">
       <AppSidebar />
-      <SidebarInset className="p-6">{children}</SidebarInset>
+      <main className="flex-1 p-6">{children}</main>
     </div>
   )
 }

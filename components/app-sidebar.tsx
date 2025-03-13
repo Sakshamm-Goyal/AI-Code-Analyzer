@@ -4,20 +4,18 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { UserButton } from "@clerk/nextjs"
 import { BarChart, Code, GitBranch, Home, Settings, Shield, Calendar } from "lucide-react"
-import {
-  Sidebar,
-  SidebarContent,
-  SidebarFooter,
-  SidebarHeader,
-  SidebarMenu,
-  SidebarMenuButton,
-  SidebarMenuItem,
-  SidebarTrigger,
-} from "@/components/ui/sidebar"
 import { ModeToggle } from "@/components/mode-toggle"
+import { cn } from "@/lib/utils"
 
 export function AppSidebar() {
   const pathname = usePathname()
+
+  const isActive = (href: string) => {
+    if (href === "/dashboard") {
+      return pathname === href
+    }
+    return pathname.startsWith(href)
+  }
 
   const menuItems = [
     {
@@ -58,35 +56,38 @@ export function AppSidebar() {
   ]
 
   return (
-    <Sidebar>
-      <SidebarHeader className="flex items-center justify-between p-4">
+    <nav className="flex h-screen w-64 flex-col border-r bg-background">
+      <div className="flex h-14 items-center border-b px-4">
         <Link href="/dashboard" className="flex items-center gap-2 font-bold">
           <Shield className="h-6 w-6 text-primary" />
           <span>CodeScan AI</span>
         </Link>
-        <SidebarTrigger />
-      </SidebarHeader>
-      <SidebarContent>
-        <SidebarMenu>
+      </div>
+      <div className="flex-1 overflow-auto py-4">
+        <ul className="space-y-1 px-2">
           {menuItems.map((item) => (
-            <SidebarMenuItem key={item.href}>
-              <SidebarMenuButton asChild isActive={pathname === item.href} tooltip={item.title}>
-                <Link href={item.href}>
-                  <item.icon className="h-4 w-4" />
-                  <span>{item.title}</span>
-                </Link>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
+            <li key={item.href}>
+              <Link
+                href={item.href}
+                className={cn(
+                  "flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-accent",
+                  isActive(item.href) ? "bg-accent text-accent-foreground" : "text-muted-foreground"
+                )}
+              >
+                <item.icon className="h-4 w-4" />
+                {item.title}
+              </Link>
+            </li>
           ))}
-        </SidebarMenu>
-      </SidebarContent>
-      <SidebarFooter className="p-4">
+        </ul>
+      </div>
+      <div className="border-t p-4">
         <div className="flex items-center justify-between">
           <UserButton afterSignOutUrl="/" />
           <ModeToggle />
         </div>
-      </SidebarFooter>
-    </Sidebar>
+      </div>
+    </nav>
   )
 }
 
