@@ -1,11 +1,15 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { auth } from "@clerk/nextjs"
+import { getAuth } from "@clerk/nextjs/server"
 import { createGitHubClient } from "@/lib/github"
 import { GoogleGenerativeAI } from "@google/generative-ai"
 import { updateRepository, getRepositoryById, createRepository } from "@/lib/db"
 import { parseGitHubUrl } from "@/lib/github"
 import { sendNotification } from "@/lib/notifications"
 import { Resend } from 'resend'
+import { waitForRateLimit } from "@/lib/rate-limit"
+import { analyzeCode } from "@/lib/gemini"
+import { getFileContent, getLanguageFromFilename } from "@/lib/github-utils"
+import { headers } from 'next/headers'
 
 // Initialize services
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -88,24 +92,30 @@ function shouldSkipDirectory(path: string): boolean {
 }
 
 export async function GET(
-  req: NextRequest,
+  request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    // Auth check
-    const { userId } = await auth();
+    // Get the ID using destructuring directly in the function parameters
+    const { id } = params;
+    
+    // Use Clerk auth
+    const auth = getAuth(request);
+    const userId = auth.userId;
+    
     if (!userId) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Get repository
-    const repository = await getRepositoryById(params.id);
+    // Use id directly
+    const repository = await getRepositoryById(id);
+    
     if (!repository) {
       return NextResponse.json({ error: "Repository not found" }, { status: 404 });
     }
 
-    // Get scan status from queue or create default status
-    const scanJob = scanQueue.get(params.id) || {
+    // Use id directly
+    const scanJob = scanQueue.get(id) || {
       status: repository.lastScan ? 'completed' : 'not_found',
       progress: 0,
       issues: repository.issues || { high: 0, medium: 0, low: 0 }
@@ -122,22 +132,23 @@ export async function GET(
 }
 
 export async function POST(
-  req: NextRequest,
+  request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    // Auth check
-    const { userId } = await auth();
+    // Get the ID using destructuring directly in the function parameters
+    const { id } = params;
+    
+    // Use Clerk auth
+    const auth = getAuth(request);
+    const userId = auth.userId;
+    
     if (!userId) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Try to get repository from database first
-    const repoId = params.id;
-    console.log("Looking up repository with ID:", repoId);
-    
-    let repository = await getRepositoryById(repoId);
-    console.log("Repository lookup result:", repository);
+    // Use id directly
+    let repository = await getRepositoryById(id);
     
     // If not found in DB, try to fetch from GitHub API
     if (!repository) {
@@ -147,7 +158,7 @@ export async function POST(
         
         // Use repository ID to get details from GitHub
         const { data: repoData } = await client.request('GET /repositories/{repository_id}', {
-          repository_id: parseInt(repoId)
+          repository_id: parseInt(id)
         });
         
         if (repoData) {
@@ -181,7 +192,7 @@ export async function POST(
     }
     
     if (!repository) {
-      console.log("Still no repository found for ID:", repoId);
+      console.log("Still no repository found for ID:", id);
       return NextResponse.json({ error: "Repository not found" }, { status: 404 });
     }
 
@@ -194,8 +205,8 @@ export async function POST(
 
     // Create scan job
     const job: ScanJob = {
-      repositoryId: repoId,
-      userId,
+      repositoryId: id,
+      userId: userId,
       status: 'pending',
       progress: 0,
       startTime: new Date(),
@@ -203,21 +214,21 @@ export async function POST(
     };
 
     // Add to queue
-    scanQueue.set(repoId, job);
+    scanQueue.set(id, job);
 
-    // Start processing in background
+    // Start processing
     processScan(job, parsed.owner, parsed.repo).catch(error => {
       console.error("Scan processing error:", error);
       job.status = 'failed';
       job.error = error.message;
     });
 
+    // Return response
     return NextResponse.json({
       message: "Scan initiated",
       status: job.status,
       progress: job.progress
     });
-
   } catch (error) {
     console.error("Error initiating scan:", error);
     return NextResponse.json(
@@ -230,73 +241,132 @@ export async function POST(
 async function processScan(job: ScanJob, owner: string, repo: string) {
   try {
     job.status = 'processing';
-    
     const client = await createGitHubClient();
     
-    // Get repository files
+    // Get list of files in the repository
+    console.log(`Getting files for ${owner}/${repo}...`);
     const files = await getRepositoryFiles(client, owner, repo);
     const totalFiles = files.length;
     let processedFiles = 0;
     const results = [];
 
     // Process files in batches
+    const batches = [];
     for (let i = 0; i < files.length; i += BATCH_SIZE) {
-      const batch = files.slice(i, i + BATCH_SIZE);
-      
-      for (const file of batch) {
-        try {
-          // Update progress
-          processedFiles++;
-          job.progress = Math.round((processedFiles / totalFiles) * 100);
-
-          // Respect rate limits
-          await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_FILES));
-        } catch (error) {
-          console.error(`Error processing file ${file.path}:`, error);
-        }
-      }
+      batches.push(files.slice(i, i + BATCH_SIZE));
     }
 
-    // Update repository with results
-    await updateRepository(job.repositoryId, {
-      lastScan: new Date().toISOString(),
-      issues: job.issues,
-      scanResults: results
-    });
+    console.log(`Processing ${totalFiles} files in ${batches.length} batches...`);
 
-    // Mark job as completed
+    const issues = { high: 0, medium: 0, low: 0 };
+
+    for (const batch of batches) {
+      for (const file of batch) {
+        try {
+          // Wait for rate limit before processing each file
+          await waitForRateLimit();
+
+          // Get file content
+          const content = await getFileContent(file, client, owner, repo);
+          if (!content || content.length > MAX_FILE_SIZE) {
+            console.log(`Skipping ${file.path} (empty or too large: ${content?.length || 0} bytes)`);
+            processedFiles++;
+            job.progress = Math.floor((processedFiles / totalFiles) * 100);
+            continue;
+          }
+
+          console.log(`Analyzing ${file.path}...`);
+
+          // Analyze with Gemini
+          const analysis = await analyzeCode(
+            content,
+            getLanguageFromFilename(file.path),
+            ['security', 'quality']
+          );
+
+          console.log(`Analysis completed for ${file.path}`);
+
+          // Update issue counts
+          if (analysis.issues && analysis.issues.length > 0) {
+            analysis.issues.forEach(issue => {
+              issues[issue.severity]++;
+            });
+          }
+
+          // Add file results to the overall results
+          results.push({
+            file: file.path,
+            analysis
+          });
+
+          processedFiles++;
+          job.progress = Math.floor((processedFiles / totalFiles) * 100);
+          job.issues = issues;
+
+        } catch (error) {
+          console.error(`Error processing file ${file.path}:`, error);
+          processedFiles++;
+          job.progress = Math.floor((processedFiles / totalFiles) * 100);
+        }
+      }
+      // Add a delay between batches to avoid overloading the APIs
+      await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_FILES));
+    }
+
+    console.log("Scan completed, updating repository...");
+    
+    // Update repository with scan results
+    const repository = await getRepositoryById(job.repositoryId);
+    if (repository) {
+      await updateRepository(job.repositoryId, { 
+        lastScan: new Date(),
+        issues: issues,
+        scanResults: results
+      });
+    }
+
     job.status = 'completed';
-    job.progress = 100;
+    job.issues = issues;
 
-    // Send notifications
-    await sendScanCompletionNotifications(job);
+    console.log("Repository scan results:", issues);
 
-  } catch (error) {
-    job.status = 'failed';
-    job.error = error instanceof Error ? error.message : "Scan failed";
-    throw error;
-  }
-}
-
-async function sendScanCompletionNotifications(job: ScanJob) {
-  try {
-    // Send email notification
-    await resend.emails.send({
-      from: 'security-scanner@yourdomain.com',
-      to: job.userId,
-      subject: 'Repository Scan Complete',
-      html: `Your repository scan has completed. Found ${job.issues?.high || 0} high, ${job.issues?.medium || 0} medium, and ${job.issues?.low || 0} low severity issues.`
-    });
+    // Send notification via email
+    try {
+      const email = await resend.emails.send({
+        from: 'GitHub Guardian <notifications@github-guardian.example.com>',
+        to: [job.userId],
+        subject: 'Repository Scan Complete',
+        html: `
+          <h1>Repository Scan Complete</h1>
+          <p>Your repository scan has completed with the following results:</p>
+          <ul>
+            <li>High severity issues: ${issues.high}</li>
+            <li>Medium severity issues: ${issues.medium}</li>
+            <li>Low severity issues: ${issues.low}</li>
+          </ul>
+          <p>View the detailed report in your dashboard.</p>
+        `,
+      });
+      console.log("Email notification sent:", email);
+    } catch (error) {
+      console.error("Error sending email notification:", error);
+    }
 
     // Send in-app notification
-    await sendNotification(job.userId, {
-      type: 'scan_complete',
-      priority: 'medium',
-      title: 'Repository Scan Complete',
-      message: 'Your repository scan has finished. View the results now.',
-      metadata: { repositoryId: job.repositoryId }
-    });
+    try {
+      await sendNotification(job.userId, {
+        type: 'scan_complete',
+        priority: 'medium',
+        title: 'Repository Scan Complete',
+        message: 'Your repository scan has finished. View the results now.',
+        metadata: { repositoryId: job.repositoryId }
+      });
+    } catch (error) {
+      console.error("Error sending notifications:", error);
+    }
   } catch (error) {
-    console.error("Error sending notifications:", error);
+    console.error("Error processing scan:", error);
+    job.status = 'failed';
+    job.error = error.message;
   }
 } 
