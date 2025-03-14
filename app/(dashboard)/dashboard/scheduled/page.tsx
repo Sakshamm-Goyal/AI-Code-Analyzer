@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
-import type { Metadata } from "next"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -11,11 +10,6 @@ import { Calendar, Clock, GitBranch, Play, Pause, Trash2, Loader2 } from "lucide
 import { ScheduleScanForm } from "@/components/scheduled/schedule-scan-form"
 import { useToast } from "@/components/ui/use-toast"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog"
-
-export const metadata: Metadata = {
-  title: "Scheduled Scans - CodeScan AI",
-  description: "Manage your scheduled code scans",
-}
 
 interface ScheduledScan {
   id: string
