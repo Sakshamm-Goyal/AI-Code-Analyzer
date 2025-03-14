@@ -120,7 +120,12 @@ export async function GET(
           );
         }
         
-        return NextResponse.json({ repository });
+        return NextResponse.json({ 
+          repository: {
+            ...repository,
+            scanResults: repository.scanResults || []
+          }
+        });
       }
     } catch (dbError) {
       console.error("Database error:", dbError);

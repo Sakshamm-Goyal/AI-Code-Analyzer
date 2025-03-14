@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs"
 import { createGitHubClient } from "@/lib/github"
 import { GoogleGenerativeAI } from "@google/generative-ai"
-import { updateRepository, getRepositoryById, createRepository } from "@/lib/db"
+import { updateRepository, getRepositoryById, createRepository, supabase } from "@/lib/db"
 import { parseGitHubUrl } from "@/lib/github"
 import { sendNotification } from "@/lib/notifications"
 import { Resend } from 'resend'
@@ -99,8 +99,8 @@ export async function GET(
   { params }: { params: { id: string } }
 ) {
   // Always await params in App Router
-  const id = params?.id;
-  console.log(`GET scan status for repository ${id}`);
+  const { id } = params;
+  console.log(`GET scan status for repository ${id}`);    
 
   try {
     // Get the authenticated user
@@ -118,37 +118,39 @@ export async function GET(
       const repository = await getRepositoryById(id);
       
       if (repository && repository.lastScan) {
-        // Return completed status with issues from the database
         return NextResponse.json({
           status: 'completed',
           progress: 100,
           issues: repository.issues || { high: 0, medium: 0, low: 0 },
-          completedAt: repository.lastScan
         });
       }
       
-      // No scan found
       return NextResponse.json({
         status: 'not_found',
         progress: 0,
         issues: { high: 0, medium: 0, low: 0 }
       });
     }
-
-    // Return current scan status
+    
+    // Return progress information
     return NextResponse.json({
       status: scanJob.status,
       progress: scanJob.progress,
-      startTime: scanJob.startTime,
       issues: scanJob.issues || { high: 0, medium: 0, low: 0 },
-      totalFiles: scanJob.totalFiles,
-      processedFiles: scanJob.processedFiles,
-      error: scanJob.error
+      processedFiles: scanJob.processedFiles || 0,
+      totalFiles: scanJob.totalFiles || 0,
+      error: scanJob.error,
     });
   } catch (error) {
     console.error("Error getting scan status:", error);
+    
     return NextResponse.json(
-      { error: "Failed to get scan status" },
+      { 
+        error: "Failed to get scan status",
+        status: 'failed',
+        progress: 0,
+        issues: { high: 0, medium: 0, low: 0 }
+      },
       { status: 500 }
     );
   }
@@ -274,26 +276,16 @@ async function processScan(job: ScanJob, repoName: string, owner: string) {
     const filesToAnalyze = files.filter(file => !shouldSkipFile(file.path));
     console.log(`After filtering, analyzing ${filesToAnalyze.length} out of ${files.length} files`);
     
-    // Process files in batches
+    // Calculate total files and initialize counters
+    const totalFiles = files.length;
+    let processedFiles = 0;
+    const results: any[] = [];
     const issues = { high: 0, medium: 0, low: 0 };
-    const results = [];
-    
+
     // Process files in batches
-    const batches = [];
-    for (let i = 0; i < filesToAnalyze.length; i += BATCH_SIZE) {
-      batches.push(filesToAnalyze.slice(i, i + BATCH_SIZE));
-    }
-    
-    console.log(`Split files into ${batches.length} batches of ${BATCH_SIZE} files each`);
-    
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-      const batch = batches[batchIndex];
-      console.log(`Processing batch ${batchIndex + 1} of ${batches.length} (${batch.length} files)`);
-      
-      // Process each file in the batch
+    for (let i = 0; i < files.length; i += BATCH_SIZE) {
+      const batch = files.slice(i, i + BATCH_SIZE);
       const batchPromises = batch.map(async (file) => {
-        console.log(`Processing file: ${file.path}`);
-        
         try {
           // Skip files that are too large
           if (file.size > MAX_FILE_SIZE) {
@@ -325,123 +317,99 @@ async function processScan(job: ScanJob, repoName: string, owner: string) {
           // Analyze the file
           const analysis = await analyzeCode(content, language);
           
-          // Count issues by severity
-          if (analysis && analysis.issues) {
-            for (const issue of analysis.issues) {
-              if (issue.severity === 'high') issues.high++;
-              else if (issue.severity === 'medium') issues.medium++;
-              else if (issue.severity === 'low') issues.low++;
-            }
-          }
-          
-          // Update progress
-          job.processedFiles = (job.processedFiles || 0) + 1;
-          job.progress = Math.round((job.processedFiles / (job.totalFiles || 1)) * 100);
-          
-          // Update issues count
-          job.issues = { ...issues };
+          // Update progress after each file
+          processedFiles++;
+          job.progress = Math.floor((processedFiles / totalFiles) * 100);
+          job.processedFiles = processedFiles;
+          job.totalFiles = totalFiles;
           scanQueue.set(job.repositoryId, { ...job });
-          
+
           return {
             file: file.path,
             analysis: analysis,
-            issues: analysis?.issues?.length || 0
+            issues: analysis.issues?.length || 0
           };
         } catch (error) {
           console.error(`Error processing file ${file.path}:`, error);
-          return {
-            file: file.path,
-            error: error instanceof Error ? error.message : String(error)
-          };
+          return { file: file.path, error: error.message, skipped: true };
         }
       });
-      
-      // Wait for all files in the batch to be processed
+
       const batchResults = await Promise.all(batchPromises);
-      results.push(...batchResults);
-      
-      console.log(`Batch completed. Waiting ${LONGER_DELAY}ms before next batch...`);
-      await new Promise(resolve => setTimeout(resolve, LONGER_DELAY));
-    }
-    
-    // Update repository in database with scan results
-    console.log(`Scan completed. Updating repository ${job.repositoryId} with results`);
-    
-    const resultsWithIssues = results.filter(r => !r.skipped && r.issues && r.issues > 0);
-    
-    try {
-      // Update repository with scan results
-      await updateRepository(job.repositoryId, { 
-        lastScan: new Date().toISOString(),
-        issues: issues,
-        scanResults: resultsWithIssues
-      });
-      
-      // Save each scan result to scan_history table
-      try {
-        const { supabase } = await import("@/lib/db");
-        
-        if (supabase) {
-          // Insert a record for the scan
-          const { data: scanRecord, error: scanError } = await supabase
-            .from('repositories_scan')
-            .insert({
-              repository_id: job.repositoryId,
-              status: 'completed',
-              completed_at: new Date().toISOString(),
-              issues: issues,
-              results: resultsWithIssues
-            })
-            .select();
-            
-          if (scanError) {
-            console.error("Error saving scan record:", scanError);
-          } else {
-            console.log("Scan record saved successfully:", scanRecord);
-          }
-          
-          // Insert individual file analyses for history
-          for (const result of resultsWithIssues) {
-            if (!result) continue;
-            
-            const { data: historyRecord, error: historyError } = await supabase
-              .from('scan_history')
-              .insert({
-                repository_id: job.repositoryId,
-                file_path: result.file,
-                analysis: result.analysis,
-                issues_count: result.analysis?.issues?.length || 0
-              });
-              
-            if (historyError) {
-              console.error(`Error saving analysis for ${result.file}:`, historyError);
+      results.push(...batchResults.filter(r => !r.skipped));
+
+      // Update issues count
+      batchResults.forEach(result => {
+        if (result.analysis?.issues) {
+          result.analysis.issues.forEach((issue: any) => {
+            if (issue.severity) {
+              issues[issue.severity.toLowerCase()]++;
             }
-          }
+          });
         }
-      } catch (dbError) {
-        console.error("Error saving scan history:", dbError);
+      });
+
+      // Wait before next batch
+      if (i + BATCH_SIZE < files.length) {
+        console.log(`Batch completed. Waiting ${LONGER_DELAY}ms before next batch...`);
+        await new Promise(resolve => setTimeout(resolve, LONGER_DELAY));
       }
-      
-      // Verify the update succeeded
-      const updatedRepo = await getRepositoryById(job.repositoryId);
-      
-      if (updatedRepo) {
-        console.log(`Repository updated. Issue counts: High=${updatedRepo.issues?.high || 0}, Medium=${updatedRepo.issues?.medium || 0}, Low=${updatedRepo.issues?.low || 0}`);
-        console.log(`Scan results saved: ${updatedRepo.scanResults?.length || 0} files`);
-      } else {
-        console.error("Failed to verify repository update!");
-      }
-    } catch (updateError) {
-      console.error("Error updating repository with scan results:", updateError);
     }
 
+    // Ensure progress is 100% when scan is complete
+    job.progress = 100;
     job.status = 'completed';
     job.issues = issues;
     scanQueue.set(job.repositoryId, { ...job });
 
-    console.log("Repository scan results:", issues);
+    // Format scan results for storage
+    const formattedResults = results.map(result => ({
+      file: result.file,
+      analysis: {
+        issues: result.analysis?.issues || [],
+        summary: result.analysis?.summary || null
+      }
+    }));
 
-    // Send notifications
+    try {
+      // Update repository with scan results
+      await updateRepository(job.repositoryId, {
+        lastScan: new Date().toISOString(),
+        issues: issues,
+        scanResults: formattedResults
+      });
+
+      // Save scan record to Supabase
+      if (supabase) {
+        const { data: scanRecord, error: scanError } = await supabase
+          .from('repositories_scan')
+          .insert({
+            repository_id: job.repositoryId,
+            status: 'completed',
+            completed_at: new Date().toISOString(),
+            issues: issues,
+            results: formattedResults
+          })
+          .select();
+
+        if (scanError) {
+          console.error("Error saving scan record:", scanError);
+        } else {
+          console.log("Scan record saved successfully:", scanRecord);
+        }
+      }
+
+      // Verify the update succeeded
+      const updatedRepo = await getRepositoryById(job.repositoryId);
+      if (updatedRepo) {
+        console.log(`Repository updated. Scan results saved: ${formattedResults.length} files`);
+        console.log(`Issue counts: High=${issues.high}, Medium=${issues.medium}, Low=${issues.low}`);
+      }
+    } catch (dbError) {
+      console.error("Error saving scan results:", dbError);
+    }
+
+    // Send notifications after successful scan
     try {
       // Get user email - using first email from Clerk
       const userEmail = user.emailAddresses[0]?.emailAddress;

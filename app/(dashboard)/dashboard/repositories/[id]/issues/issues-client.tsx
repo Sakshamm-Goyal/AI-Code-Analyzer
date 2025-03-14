@@ -34,36 +34,26 @@ export function IssuesClient({ repository }: { repository: any }) {
       
       // Process scan results to extract issues
       repository.scanResults.forEach((result: any) => {
-        if (!result) {
-          console.warn("Found null scan result entry");
+        if (!result || !result.analysis?.issues) {
+          console.warn("Invalid scan result entry:", result);
           return;
         }
         
         const filePath = result.file;
-        console.log(`Processing result for ${filePath}:`, result);
+        const issues = result.analysis.issues;
         
-        // Make sure we have analysis and issues
-        const analysis = result.analysis || {};
-        const issues = Array.isArray(analysis.issues) ? analysis.issues : [];
-        
-        console.log(`Found ${issues.length} issues in ${filePath}`);
+        console.log(`Processing ${issues.length} issues from ${filePath}`);
         
         // Process each issue
         issues.forEach((issue: any) => {
-          // Skip invalid issues
-          if (!issue || !issue.title || !issue.severity || !issue.description) {
-            console.warn(`Skipping invalid issue in ${filePath}:`, issue);
-            return;
-          }
+          if (!issue || !issue.severity) return;
           
-          // Add file info to each issue for context
           const issueWithFile = {
             ...issue,
             file: filePath
           };
           
-          // Add to appropriate severity list
-          switch (issue.severity?.toLowerCase()) {
+          switch (issue.severity.toLowerCase()) {
             case 'high':
               high.push(issueWithFile);
               break;
@@ -73,15 +63,12 @@ export function IssuesClient({ repository }: { repository: any }) {
             case 'low':
               low.push(issueWithFile);
               break;
-            default:
-              console.warn(`Unknown severity for issue: ${issue.severity}`);
-              // Default to low if unknown
-              low.push(issueWithFile);
           }
         });
       });
       
-      // Update state with processed issues
+      console.log(`Processed issues - High: ${high.length}, Medium: ${medium.length}, Low: ${low.length}`);
+      
       setHighIssues(high);
       setMediumIssues(medium);
       setLowIssues(low);
