@@ -1,111 +1,196 @@
-// Safe import that won't break if WebSocket server isn't working
-let notifyUserFn: (userId: string, data: any) => void;
+import { Resend } from 'resend'
 
-try {
-  const websocketModule = require('@/pages/api/websocket');
-  notifyUserFn = websocketModule.notifyUser;
-} catch (error) {
-  console.warn("WebSocket notification system not available, using fallback");
-  notifyUserFn = (userId: string, data: any) => {
-    console.log(`[Notification Fallback] User ${userId}:`, data);
-    return Promise.resolve();
+// Initialize Resend for email sending
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+// In-memory notification store by user
+const userNotifications: Record<string, Notification[]> = {};
+
+// Define notification interfaces
+interface Notification {
+  id: string;
+  title: string;
+  message: string;
+  metadata?: Record<string, any>;
+  createdAt: string;
+  read: boolean;
+}
+
+// Base notification options
+interface NotificationOptions {
+  title: string;
+  message: string;
+  metadata?: Record<string, any>;
+}
+
+// Scan notification options
+interface ScanNotificationOptions {
+  userId: string;
+  repositoryName: string;
+  scanId: string;
+  status: 'completed' | 'failed';
+  summary?: {
+    high: number;
+    medium: number;
+    low: number;
   };
 }
 
-type NotificationType = "scan_complete" | "security_alert" | "error"
-type NotificationPriority = "high" | "medium" | "low"
+// Safe import that won't break if WebSocket server isn't working
+let notifyUserViaWebSocket: (userId: string, data: any) => void;
 
-interface NotificationOptions {
-  type: NotificationType
-  priority: NotificationPriority
-  title: string
-  message: string
-  metadata?: Record<string, any>
+try {
+  const websocketModule = require('@/pages/api/websocket');
+  notifyUserViaWebSocket = websocketModule.sendWebSocketMessage;
+} catch (error) {
+  console.warn("WebSocket notification system not available, using fallback");
+  notifyUserViaWebSocket = (userId: string, data: any) => {
+    console.log(`[Notification Fallback] User ${userId}:`, data);
+    return false;
+  };
 }
 
-export async function sendNotification(userId: string, options: NotificationOptions) {
+// Single implementation of sendNotification
+export async function sendNotification(
+  userId: string, 
+  options: NotificationOptions
+): Promise<Notification | null> {
+  if (!userId) {
+    throw new Error("User ID is required to send notification");
+  }
+
+  // Create the notification
+  const notification: Notification = {
+    id: generateId(),
+    title: options.title,
+    message: options.message,
+    metadata: options.metadata || {},
+    createdAt: new Date().toISOString(),
+    read: false
+  };
+
+  // Initialize notifications array for user if needed
+  if (!userNotifications[userId]) {
+    userNotifications[userId] = [];
+  }
+
+  // Add notification to user's list
+  userNotifications[userId].push(notification);
+
+  // Limit to 100 notifications per user
+  if (userNotifications[userId].length > 100) {
+    userNotifications[userId] = userNotifications[userId].slice(-100);
+  }
+
+  console.log(`Notification sent to user ${userId}: ${notification.title}`);
+  
+  // Try to send via WebSocket if available
   try {
-    // Send to WebSocket clients using the safely imported function
-    notifyUserFn(userId, {
-      type: options.type,
-      ...options,
-      timestamp: new Date().toISOString(),
+    notifyUserViaWebSocket(userId, {
+      type: 'notification',
+      notification
     });
-
-    // Also store in database (if needed)
-    try {
-      const response = await fetch("/api/notifications", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId,
-          ...options,
-          timestamp: new Date().toISOString(),
-        }),
-      });
-
-      if (!response.ok) {
-        console.warn("Failed to store notification in database");
-      }
-      
-      return { success: true };
-    } catch (dbError) {
-      console.warn("Error storing notification:", dbError);
-      return { success: true, warning: "Notification sent but not stored" };
-    }
-  } catch (error) {
-    console.error("Error sending notification:", error);
-    // Return success anyway - don't let notification failure block other operations
-    return { success: true, warning: "Notification system error" };
+  } catch (wsError) {
+    console.warn("Error sending notification through WebSocket:", wsError);
   }
+  
+  // Return the created notification
+  return notification;
 }
 
-import { Resend } from 'resend'
-
-const resend = new Resend(process.env.RESEND_API_KEY)
-
-interface NotificationOptions {
-  userId: string
-  repositoryName: string
-  scanId: string
-  status: 'completed' | 'failed'
-  summary?: {
-    high: number
-    medium: number
-    low: number
-  }
-}
-
-export async function sendScanNotification({
-  userId,
-  repositoryName,
-  scanId,
-  status,
-  summary,
-}: NotificationOptions) {
+// Implementation of sendScanNotification
+export async function sendScanNotification(options: ScanNotificationOptions): Promise<Notification | null> {
   try {
     // Get user email from your user management system
-    const userEmail = await getUserEmail(userId)
+    const userEmail = await getUserEmail(options.userId);
     
-    const subject = `Scan ${status} for ${repositoryName}`
-    let content = `Your scheduled scan for ${repositoryName} has ${status}.`
+    const subject = `Scan ${options.status} for ${options.repositoryName}`;
+    let content = `Your scheduled scan for ${options.repositoryName} has ${options.status}.`;
     
-    if (status === 'completed' && summary) {
-      content += `\n\nSummary:\n- High severity issues: ${summary.high}\n- Medium severity issues: ${summary.medium}\n- Low severity issues: ${summary.low}`
+    if (options.status === 'completed' && options.summary) {
+      content += `\n\nSummary:\n- High severity issues: ${options.summary.high}\n- Medium severity issues: ${options.summary.medium}\n- Low severity issues: ${options.summary.low}`;
     }
 
-    await resend.emails.send({
-      from: 'CodeScan AI <notifications@codescan.ai>',
-      to: userEmail,
-      subject,
-      text: content,
-    })
+    // Email sending logic
+    try {
+      await resend.emails.send({
+        from: 'CodeScan AI <notifications@codescan.ai>',
+        to: userEmail,
+        subject,
+        text: content,
+      });
+      console.log(`Email sent to ${userEmail} with subject: ${subject}`);
+    } catch (emailError) {
+      console.error('Error sending email:', emailError);
+    }
+    
+    // Also send as in-app notification
+    return sendNotification(options.userId, {
+      title: subject,
+      message: content,
+      metadata: { scanId: options.scanId, repositoryName: options.repositoryName }
+    });
   } catch (error) {
-    console.error('Error sending notification:', error)
+    console.error('Error sending notification:', error);
+    return null;
   }
 }
 
 async function getUserEmail(userId: string): Promise<string> {
   // Implement your user email lookup logic here
-  return 'user@example.com'
+  return 'user@example.com';
+}
+
+export async function getNotifications(userId: string): Promise<Notification[]> {
+  if (!userId) {
+    throw new Error("User ID is required to get notifications");
+  }
+  
+  return userNotifications[userId] || [];
+}
+
+export async function markNotificationAsRead(
+  userId: string,
+  notificationId: string
+): Promise<boolean> {
+  if (!userId || !notificationId) {
+    throw new Error("User ID and notification ID are required");
+  }
+  
+  if (!userNotifications[userId]) {
+    return false;
+  }
+  
+  const notification = userNotifications[userId].find(n => n.id === notificationId);
+  
+  if (notification) {
+    notification.read = true;
+    return true;
+  }
+  
+  return false;
+}
+
+export async function deleteNotification(
+  userId: string,
+  notificationId: string
+): Promise<boolean> {
+  if (!userId || !notificationId) {
+    throw new Error("User ID and notification ID are required");
+  }
+  
+  if (!userNotifications[userId]) {
+    return false;
+  }
+  
+  const initialLength = userNotifications[userId].length;
+  userNotifications[userId] = userNotifications[userId].filter(n => n.id !== notificationId);
+  
+  return initialLength !== userNotifications[userId].length;
+}
+
+// Helper function to generate a random ID
+function generateId(): string {
+  return Math.random().toString(36).substring(2, 15) + 
+         Math.random().toString(36).substring(2, 15);
 } 

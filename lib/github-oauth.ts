@@ -1,10 +1,12 @@
 import { Octokit } from "@octokit/rest"
 
 export const GITHUB_OAUTH_CONFIG = {
-  clientId: process.env.GITHUB_CLIENT_ID!,
-  clientSecret: process.env.GITHUB_CLIENT_SECRET!,
-  redirectUri: `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/github/callback`,
-  scope: "repo user",
+  clientId: process.env.GITHUB_CLIENT_ID || '',
+  clientSecret: process.env.GITHUB_CLIENT_SECRET || '',
+  redirectUri: process.env.NEXT_PUBLIC_URL 
+    ? `${process.env.NEXT_PUBLIC_URL}/api/auth/github/callback` 
+    : 'http://localhost:3000/api/auth/github/callback',
+  scope: 'repo,read:user,user:email',
 }
 
 export async function createGitHubClient(accessToken: string) {
@@ -28,26 +30,32 @@ function generateState() {
   return Math.random().toString(36).substring(7)
 }
 
-export async function exchangeCodeForToken(code: string) {
-  const response = await fetch("https://github.com/login/oauth/access_token", {
-    method: "POST",
-    headers: {
-      "Accept": "application/json",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      client_id: GITHUB_OAUTH_CONFIG.clientId,
-      client_secret: GITHUB_OAUTH_CONFIG.clientSecret,
-      code,
-      redirect_uri: GITHUB_OAUTH_CONFIG.redirectUri,
-    }),
-  })
+export async function exchangeCodeForToken(code: string): Promise<string> {
+  const params = new URLSearchParams({
+    client_id: GITHUB_OAUTH_CONFIG.clientId,
+    client_secret: GITHUB_OAUTH_CONFIG.clientSecret,
+    code,
+    redirect_uri: GITHUB_OAUTH_CONFIG.redirectUri,
+  });
 
-  const data = await response.json()
-  
-  if (data.error) {
-    throw new Error(data.error_description || "Failed to exchange code for token")
+  const response = await fetch('https://github.com/login/oauth/access_token', {
+    method: 'POST',
+    headers: {
+      'Accept': 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: params.toString(),
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub OAuth error: ${response.statusText}`);
   }
 
-  return data.access_token
+  const data = await response.json();
+  
+  if (data.error) {
+    throw new Error(`GitHub OAuth error: ${data.error_description || data.error}`);
+  }
+
+  return data.access_token;
 } 

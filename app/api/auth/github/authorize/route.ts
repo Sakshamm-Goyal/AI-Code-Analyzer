@@ -4,7 +4,8 @@ import { GITHUB_OAUTH_CONFIG } from "@/lib/github-oauth"
 
 export async function GET(req: NextRequest) {
   try {
-    const { userId } = auth()
+    // IMPORTANT: Must await auth() in App Router
+    const { userId } = await auth()
     if (!userId) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }

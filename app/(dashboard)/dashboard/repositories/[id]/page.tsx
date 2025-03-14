@@ -2,10 +2,10 @@
 
 import { useState, useEffect } from "react"
 import Link from "next/link"
-import { ArrowLeft, GitBranch, GitFork, Star, AlertCircle, AlertTriangle, CheckCircle, Loader2 } from "lucide-react"
+import { ArrowLeft, GitBranch, GitFork, Star, AlertCircle, AlertTriangle, CheckCircle, Loader2, ShieldAlert, List, Calendar, Clock } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card"
 import { useParams, useRouter } from "next/navigation"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useToast } from "@/components/ui/use-toast"
@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge"
 import { FileExplorer } from "@/components/repository/file-explorer"
 import { FileAnalysis } from "@/components/repository/file-analysis"
 import { parseGitHubUrl } from "@/lib/github"
+import LoadingSpinner from "@/components/loading-spinner"
 
 // Skeleton component for loading state
 function RepositoryDetailSkeleton() {
@@ -66,6 +67,8 @@ export default function RepositoryDetailPage() {
     setError(null)
     
     try {
+      console.log(`Fetching repository details for ID: ${params.id}`);
+      
       const response = await fetch(`/api/github/repositories/${params.id}`, {
         method: 'GET',
         headers: {
@@ -75,16 +78,18 @@ export default function RepositoryDetailPage() {
         credentials: 'include',
       })
       
-      const data = await response.json()
-      
       if (!response.ok) {
-        throw new Error(data.error || "Failed to fetch repository details")
+        const errorData = await response.json()
+        throw new Error(errorData.error || "Failed to fetch repository details")
       }
+      
+      const data = await response.json()
       
       if (!data.repository) {
         throw new Error("Repository data not found")
       }
       
+      console.log("Repository data received:", data.repository);
       setRepository(data.repository)
     } catch (error) {
       console.error("Error fetching repository details:", error)
@@ -100,80 +105,89 @@ export default function RepositoryDetailPage() {
   }
 
   const handleScanNow = async () => {
-    setIsScanning(true);
-    
     try {
-      // Show initial toast
-      toast({
-        title: "Scan started",
-        description: "Initializing repository scan...",
-      });
+      setIsScanning(true);
+
+      // Make sure we have the required info before sending
+      if (!repository || !repository.name || !repository.fullName) {
+        throw new Error("Repository information is incomplete");
+      }
+
+      // Extract owner from fullName (format: "owner/repo")
+      const owner = repository.fullName.split('/')[0];
       
-      console.log("Starting scan for repository ID:", params.id);
-      
+      console.log(`Initiating scan for repository: ${repository.fullName} (ID: ${params.id})`);
+
       const response = await fetch(`/api/github/repositories/${params.id}/scan`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Accept": "application/json",
-          "Cache-Control": "no-cache"
         },
-        credentials: "include"
+        body: JSON.stringify({
+          name: repository.name,
+          owner: owner,
+          fullName: repository.fullName
+        })
       });
       
-      // Get response data
       const jsonData = await response.json();
-      console.log("Scan response:", jsonData);
       
       // Check for success
       if (!response.ok) {
         throw new Error(jsonData.error || "Failed to scan repository");
       }
       
+      // Show success message
+      toast({
+        title: "Scan Initiated",
+        description: "Your repository scan has been started. You'll be redirected to the scan status page.",
+        variant: "default",
+      });
+      
       // Redirect to scan status page
       router.push(`/dashboard/repositories/${params.id}/scan-status`);
     } catch (error) {
       console.error("Error scanning repository:", error);
       toast({
-        title: "Error",
-        description: error instanceof Error ? error.message : "Failed to scan repository",
+        title: "Scan Failed",
+        description: error instanceof Error ? error.message : "Failed to initiate scan",
         variant: "destructive",
       });
-    } finally {
       setIsScanning(false);
     }
   };
 
   if (isLoading) {
-    return <RepositoryDetailSkeleton />
+    return (
+      <div className="container mx-auto py-6">
+        <Link href="/dashboard/repositories" className="flex items-center text-sm text-muted-foreground mb-4">
+          <ArrowLeft className="mr-1 h-4 w-4" /> Back to Repositories
+        </Link>
+        <div className="flex justify-center items-center min-h-[400px]">
+          <LoadingSpinner />
+        </div>
+      </div>
+    )
   }
 
   if (error) {
     return (
-      <div className="flex flex-col gap-6">
-        <div className="flex items-center gap-4">
-          <Button
-            variant="ghost"
-            size="sm"
-            asChild
-          >
-            <Link href="/dashboard/repositories">
-              <ArrowLeft className="h-4 w-4" />
-              Back to Repositories
-            </Link>
-          </Button>
-        </div>
-
-        <div className="flex flex-col items-center justify-center gap-4 p-8">
-          <div className="flex flex-col items-center gap-2 text-center">
-            <AlertCircle className="h-8 w-8 text-destructive" />
-            <h2 className="text-lg font-semibold">Error Loading Repository</h2>
-            <p className="text-sm text-muted-foreground">{error}</p>
-          </div>
-          <Button onClick={() => fetchRepositoryDetails()}>
-            Try Again
-          </Button>
-        </div>
+      <div className="container mx-auto py-6">
+        <Link href="/dashboard/repositories" className="flex items-center text-sm text-muted-foreground mb-4">
+          <ArrowLeft className="mr-1 h-4 w-4" /> Back to Repositories
+        </Link>
+        <Card className="border-red-200 bg-red-50">
+          <CardHeader>
+            <CardTitle>Error Loading Repository</CardTitle>
+            <CardDescription>{error}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p>Please try again or contact support if the problem persists.</p>
+          </CardContent>
+          <CardFooter>
+            <Button onClick={fetchRepositoryDetails}>Try Again</Button>
+          </CardFooter>
+        </Card>
       </div>
     )
   }

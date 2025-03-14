@@ -1,4 +1,4 @@
-import { waitForRateLimit } from "./rate-limit";
+import { waitForRateLimit, markRateLimitExhausted } from "./rate-limit";
 
 // Define the structure of the analysis result
 interface AnalysisResult {
@@ -24,54 +24,75 @@ interface AnalysisResult {
   rawAnalysis?: string;
 }
 
+// Helper for exponential backoff retries
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  retries = 3,
+  delay = 1000,
+  backoff = 2
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (retries === 0) {
+      throw error;
+    }
+    
+    console.log(`Retrying after ${delay}ms (${retries} retries left)...`);
+    await new Promise(resolve => setTimeout(resolve, delay));
+    
+    return retryWithBackoff(fn, retries - 1, delay * backoff, backoff);
+  }
+}
+
+// Filter files that aren't appropriate for code analysis
+export function shouldSkipFile(filePath: string): boolean {
+  // Skip binary files and images
+  const binaryExtensions = [
+    '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.ico', '.bmp', '.tiff',
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    '.zip', '.tar', '.gz', '.rar', '.7z',
+    '.mp3', '.mp4', '.wav', '.avi', '.mov', '.flv',
+    '.ttf', '.woff', '.woff2', '.eot',
+    '.exe', '.dll', '.so', '.dylib', '.bin', '.dat'
+  ];
+  
+  const extension = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
+  return binaryExtensions.includes(extension);
+}
+
 export async function analyzeCode(
   code: string,
   language: string,
-  analysisType: string[] = ["security", "quality"]
+  analysisType: string[] = ["security", "quality"],
+  maxRetries = 3
 ): Promise<AnalysisResult> {
+  // Skip analysis for binary files and return empty result
+  if (shouldSkipFile(language)) {
+    console.log(`Skipping analysis for binary file type: ${language}`);
+    return {
+      summary: {
+        riskScore: 0,
+        message: "Binary file - not analyzed for issues",
+      },
+      issues: [],
+      codeQuality: {
+        complexity: 0,
+        maintainability: 0,
+      },
+      bestPractices: [],
+    };
+  }
+
   try {
-    // Wait for rate limit
-    await waitForRateLimit();
-
-    // Create the prompt
-    const prompt = createAnalysisPrompt(code, language, analysisType);
-
-    // Make direct API call with exactly the format from the working curl command
-    console.log("Sending request to Gemini API...");
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{ text: prompt }]
-          }]
-        })
-      }
-    );
-
-    console.log("Gemini API response status:", response.status);
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ error: { message: response.statusText } }));
-      console.error("Gemini API error details:", errorData);
-      throw new Error(`Gemini API error: ${errorData.error?.message || response.statusText}`);
-    }
-
-    const data = await response.json();
-    console.log("Received Gemini API response:", data.candidates ? "Valid response" : "Missing candidates");
-    
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!text) {
-      console.error("No text in Gemini response:", data);
+    // Wait for rate limit - if false is returned, we should skip this file
+    const canProceed = await waitForRateLimit();
+    if (!canProceed) {
+      console.log("Rate limit check failed, skipping analysis");
       return {
         summary: {
           riskScore: 0,
-          message: "Analysis failed: Received empty response from Gemini",
+          message: "Analysis skipped due to rate limiting",
         },
         issues: [],
         codeQuality: {
@@ -79,12 +100,72 @@ export async function analyzeCode(
           maintainability: 0,
         },
         bestPractices: [],
-        rawAnalysis: "Empty response from API",
+        rawAnalysis: "Skipped due to rate limiting",
       };
     }
 
-    // Parse the response
-    return parseAnalysisResponse(text);
+    // Create the prompt
+    const prompt = createAnalysisPrompt(code, language, analysisType);
+
+    // Try making the API call with retries
+    return await retryWithBackoff(async () => {
+      console.log("Sending request to Gemini API...");
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            contents: [{
+              parts: [{ text: prompt }]
+            }]
+          })
+        }
+      );
+
+      console.log("Gemini API response status:", response.status);
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: { message: response.statusText } }));
+        console.error("Gemini API error details:", errorData);
+        
+        // If we hit a rate limit, mark the API as exhausted
+        if (response.status === 429) {
+          markRateLimitExhausted();
+          throw new Error("Rate limit exceeded");
+        }
+        
+        throw new Error(`Gemini API error: ${errorData.error?.message || response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log("Received Gemini API response:", data.candidates ? "Valid response" : "Missing candidates");
+      
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      if (!text) {
+        console.error("No text in Gemini response:", data);
+        return {
+          summary: {
+            riskScore: 0,
+            message: "Analysis failed: Received empty response from Gemini",
+          },
+          issues: [],
+          codeQuality: {
+            complexity: 0,
+            maintainability: 0,
+          },
+          bestPractices: [],
+          rawAnalysis: "Empty response from API",
+        };
+      }
+
+      // Parse the response
+      return parseAnalysisResponse(text);
+    }, maxRetries, 2000, 2);
+    
   } catch (error) {
     console.error("Error analyzing code with Gemini:", error);
     
