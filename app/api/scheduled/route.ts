@@ -1,100 +1,99 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs"
+import { z } from "zod"
+import { createScheduledScan, getScheduledScans } from "@/lib/db"
+import { scheduleCodeScan } from "@/lib/scheduler"
+import { getRepositoryById } from "@/lib/db"
+
+const createScheduleSchema = z.object({
+  repositoryId: z.string(),
+  frequency: z.enum(["daily", "weekly", "monthly"]),
+  day: z.string().optional(),
+  time: z.string(),
+  analysisTypes: z.array(z.string()),
+})
 
 export async function GET(req: NextRequest) {
   try {
     const { userId } = auth()
-
     if (!userId) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    // In a real implementation, you would fetch scheduled scans from your database
-
-    // Mock implementation
-    const scheduledScans = [
-      {
-        id: "schedule-1",
-        repository: "frontend-app",
-        frequency: "weekly",
-        day: "Monday",
-        time: "09:00",
-        lastRun: "2023-06-05T09:00:00",
-        nextRun: "2023-06-12T09:00:00",
-        status: "active",
-      },
-      {
-        id: "schedule-2",
-        repository: "backend-api",
-        frequency: "daily",
-        time: "00:00",
-        lastRun: "2023-06-09T00:00:00",
-        nextRun: "2023-06-10T00:00:00",
-        status: "active",
-      },
-      {
-        id: "schedule-3",
-        repository: "mobile-app",
-        frequency: "monthly",
-        day: "1st",
-        time: "12:00",
-        lastRun: "2023-06-01T12:00:00",
-        nextRun: "2023-07-01T12:00:00",
-        status: "paused",
-      },
-    ]
-
-    return NextResponse.json({ scheduledScans })
+    const schedules = await getScheduledScans(userId)
+    return NextResponse.json({ scheduledScans: schedules })
   } catch (error) {
     console.error("Error fetching scheduled scans:", error)
-    return NextResponse.json({ error: "Failed to fetch scheduled scans" }, { status: 500 })
+    return NextResponse.json(
+      { error: "Failed to fetch scheduled scans" },
+      { status: 500 }
+    )
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
     const { userId } = auth()
-
     if (!userId) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    const { repository, frequency, day, time, analysisType } = await req.json()
+    const data = await req.json()
+    const validatedData = createScheduleSchema.parse(data)
 
-    if (!repository || !frequency || !time) {
-      return NextResponse.json({ error: "Repository, frequency, and time are required" }, { status: 400 })
+    // Verify repository access
+    const repository = await getRepositoryById(validatedData.repositoryId)
+    if (!repository || repository.userId !== userId) {
+      return NextResponse.json(
+        { error: "Repository not found or unauthorized" },
+        { status: 404 }
+      )
     }
 
-    if (frequency !== "daily" && !day) {
-      return NextResponse.json({ error: "Day is required for weekly and monthly schedules" }, { status: 400 })
-    }
+    // Calculate next run time
+    const nextRun = getNextRunTime(
+      validatedData.frequency,
+      validatedData.day || null,
+      validatedData.time
+    )
 
-    // In a real implementation, you would:
-    // 1. Validate the input
-    // 2. Calculate the next run time
-    // 3. Store the schedule in your database
-    // 4. Set up a job scheduler (e.g., node-cron, BullMQ) to run the scan
-
-    // Mock implementation
-    const now = new Date()
-    const nextRun = new Date(now.getTime() + 24 * 60 * 60 * 1000) // Tomorrow
-
-    const scheduledScan = {
-      id: `schedule-${Date.now()}`,
-      repository,
-      frequency,
-      day: frequency === "daily" ? null : day,
-      time,
-      analysisType: analysisType || ["security", "quality"],
+    // Create schedule in database
+    const schedule = await createScheduledScan({
+      userId,
+      repositoryId: validatedData.repositoryId,
+      frequency: validatedData.frequency,
+      day: validatedData.day,
+      time: validatedData.time,
+      analysisTypes: validatedData.analysisTypes,
+      status: "active",
       lastRun: null,
       nextRun: nextRun.toISOString(),
-      status: "active",
-    }
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    })
 
-    return NextResponse.json({ scheduledScan })
+    // Set up the actual schedule
+    await scheduleCodeScan(
+      schedule.id,
+      schedule.repositoryId,
+      schedule.frequency,
+      schedule.day || null,
+      schedule.time
+    )
+
+    return NextResponse.json({ schedule })
   } catch (error) {
     console.error("Error creating scheduled scan:", error)
-    return NextResponse.json({ error: "Failed to create scheduled scan" }, { status: 500 })
+    if (error instanceof z.ZodError) {
+      return NextResponse.json(
+        { error: "Invalid schedule data", details: error.errors },
+        { status: 400 }
+      )
+    }
+    return NextResponse.json(
+      { error: "Failed to create scheduled scan" },
+      { status: 500 }
+    )
   }
 }
 

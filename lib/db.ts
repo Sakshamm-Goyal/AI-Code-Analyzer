@@ -59,13 +59,16 @@ interface ScheduledScan {
   id: string
   userId: string
   repositoryId: string
+  repositoryName: string
   frequency: "daily" | "weekly" | "monthly"
   day?: string
   time: string
-  analysisType: string[]
-  lastRun?: string
-  nextRun: string
+  analysisTypes: string[]
   status: "active" | "paused"
+  lastRun: string | null
+  nextRun: string
+  createdAt: string
+  updatedAt: string
 }
 
 // Mock data stores
@@ -398,6 +401,107 @@ async function ensureTablesExist() {
   } catch (error) {
     console.warn("Error checking/creating tables:", error)
     // Continue anyway - tables might already exist
+  }
+}
+
+export async function createScheduledScan(data: Omit<ScheduledScan, "id">): Promise<ScheduledScan> {
+  try {
+    const { data: schedule, error } = await supabase
+      .from('scheduled_scans')
+      .insert([{
+        ...data,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }])
+      .select()
+      .single()
+
+    if (error) throw error
+    return schedule
+  } catch (error) {
+    console.error("Error creating scheduled scan:", error)
+    throw error
+  }
+}
+
+export async function getScheduledScans(userId: string): Promise<ScheduledScan[]> {
+  try {
+    const { data: schedules, error } = await supabase
+      .from('scheduled_scans')
+      .select(`
+        *,
+        repository:repositories(name)
+      `)
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+
+    if (error) throw error
+    return schedules.map(schedule => ({
+      ...schedule,
+      repositoryName: schedule.repository?.name || 'Unknown Repository'
+    }))
+  } catch (error) {
+    console.error("Error fetching scheduled scans:", error)
+    return []
+  }
+}
+
+export async function getScheduledScanById(id: string): Promise<ScheduledScan | null> {
+  try {
+    const { data: schedule, error } = await supabase
+      .from('scheduled_scans')
+      .select(`
+        *,
+        repository:repositories(name)
+      `)
+      .eq('id', id)
+      .single()
+
+    if (error) throw error
+    return {
+      ...schedule,
+      repositoryName: schedule.repository?.name || 'Unknown Repository'
+    }
+  } catch (error) {
+    console.error("Error fetching scheduled scan:", error)
+    return null
+  }
+}
+
+export async function updateScheduledScan(
+  id: string,
+  data: Partial<ScheduledScan>
+): Promise<ScheduledScan> {
+  try {
+    const { data: schedule, error } = await supabase
+      .from('scheduled_scans')
+      .update({
+        ...data,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id)
+      .select()
+      .single()
+
+    if (error) throw error
+    return schedule
+  } catch (error) {
+    console.error("Error updating scheduled scan:", error)
+    throw error
+  }
+}
+
+export async function deleteScheduledScan(id: string): Promise<void> {
+  try {
+    const { error } = await supabase
+      .from('scheduled_scans')
+      .delete()
+      .eq('id', id)
+
+    if (error) throw error
+  } catch (error) {
+    console.error("Error deleting scheduled scan:", error)
+    throw error
   }
 }
 

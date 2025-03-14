@@ -58,4 +58,54 @@ export async function sendNotification(userId: string, options: NotificationOpti
     // Return success anyway - don't let notification failure block other operations
     return { success: true, warning: "Notification system error" };
   }
+}
+
+import { Resend } from 'resend'
+
+const resend = new Resend(process.env.RESEND_API_KEY)
+
+interface NotificationOptions {
+  userId: string
+  repositoryName: string
+  scanId: string
+  status: 'completed' | 'failed'
+  summary?: {
+    high: number
+    medium: number
+    low: number
+  }
+}
+
+export async function sendScanNotification({
+  userId,
+  repositoryName,
+  scanId,
+  status,
+  summary,
+}: NotificationOptions) {
+  try {
+    // Get user email from your user management system
+    const userEmail = await getUserEmail(userId)
+    
+    const subject = `Scan ${status} for ${repositoryName}`
+    let content = `Your scheduled scan for ${repositoryName} has ${status}.`
+    
+    if (status === 'completed' && summary) {
+      content += `\n\nSummary:\n- High severity issues: ${summary.high}\n- Medium severity issues: ${summary.medium}\n- Low severity issues: ${summary.low}`
+    }
+
+    await resend.emails.send({
+      from: 'CodeScan AI <notifications@codescan.ai>',
+      to: userEmail,
+      subject,
+      text: content,
+    })
+  } catch (error) {
+    console.error('Error sending notification:', error)
+  }
+}
+
+async function getUserEmail(userId: string): Promise<string> {
+  // Implement your user email lookup logic here
+  return 'user@example.com'
 } 

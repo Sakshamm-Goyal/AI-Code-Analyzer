@@ -4,6 +4,9 @@
 import { analyzeCode } from "./gemini"
 import { getRepositoryContent, getFileContent } from "./github"
 import { addScanResult, updateScheduledScanStatus } from "./db"
+import { Cron } from "croner"
+import { getRepositoryById, updateScheduledScan, createScanResult } from "@/lib/db"
+import { startCodeScan } from "@/lib/scanner"
 
 interface ScheduleOptions {
   repositoryId: string
@@ -14,35 +17,146 @@ interface ScheduleOptions {
   analysisType: string[]
 }
 
-export function scheduleCodeScan(options: ScheduleOptions) {
-  // In a real application, you would:
-  // 1. Calculate the next run time based on frequency, day, and time
-  // 2. Create a job in your scheduler (e.g., node-cron, BullMQ)
-  // 3. Return the scheduled job ID
-
-  const jobId = `job-${Date.now()}`
-
-  // Mock implementation - just log the scheduled scan
-  console.log(`Scheduled scan for repository ${options.repositoryId}:`, {
-    frequency: options.frequency,
-    day: options.day,
-    time: options.time,
-    analysisType: options.analysisType,
-  })
-
-  return jobId
+interface ScheduledJob {
+  id: string
+  cron: Cron
 }
 
-export function pauseScheduledScan(jobId: string) {
-  // In a real application, you would pause the job in your scheduler
-  console.log(`Paused scheduled scan: ${jobId}`)
-  return true
+const activeJobs = new Map<string, ScheduledJob>()
+
+export function getNextRunTime(frequency: string, day: string | null, time: string): Date {
+  const [hours, minutes] = time.split(":").map(Number)
+  const now = new Date()
+  let nextRun = new Date()
+  
+  nextRun.setHours(hours, minutes, 0, 0)
+
+  switch (frequency) {
+    case "daily":
+      if (nextRun <= now) {
+        nextRun.setDate(nextRun.getDate() + 1)
+      }
+      break
+      
+    case "weekly":
+      const daysOfWeek = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+      const targetDay = daysOfWeek.indexOf(day?.toLowerCase() || "")
+      while (nextRun.getDay() !== targetDay || nextRun <= now) {
+        nextRun.setDate(nextRun.getDate() + 1)
+      }
+      break
+      
+    case "monthly":
+      const targetDate = parseInt(day || "1")
+      nextRun.setDate(targetDate)
+      if (nextRun <= now) {
+        nextRun.setMonth(nextRun.getMonth() + 1)
+      }
+      break
+  }
+
+  return nextRun
 }
 
-export function resumeScheduledScan(jobId: string) {
-  // In a real application, you would resume the job in your scheduler
-  console.log(`Resumed scheduled scan: ${jobId}`)
-  return true
+export async function scheduleCodeScan(scheduleId: string, repositoryId: string, frequency: string, day: string | null, time: string) {
+  try {
+    // Stop existing job if any
+    stopScheduledJob(scheduleId)
+
+    const cronExpression = getCronExpression(frequency, day, time)
+    
+    const job = new Cron(cronExpression, async () => {
+      try {
+        // Get latest repository data
+        const repository = await getRepositoryById(repositoryId)
+        if (!repository) {
+          throw new Error("Repository not found")
+        }
+
+        // Create scan result entry
+        const scanResult = await createScanResult({
+          repositoryId,
+          status: "pending",
+          branch: repository.defaultBranch || "main",
+          commit: repository.lastCommit || "",
+        })
+
+        // Start the scan
+        await startCodeScan(repository, scanResult.id)
+
+        // Update next run time
+        const nextRun = getNextRunTime(frequency, day, time)
+        await updateScheduledScan(scheduleId, {
+          lastRun: new Date().toISOString(),
+          nextRun: nextRun.toISOString(),
+        })
+
+      } catch (error) {
+        console.error(`Error in scheduled scan ${scheduleId}:`, error)
+        // Update schedule with error status if needed
+      }
+    })
+
+    activeJobs.set(scheduleId, { id: scheduleId, cron: job })
+
+    // Update next run time immediately
+    const nextRun = getNextRunTime(frequency, day, time)
+    await updateScheduledScan(scheduleId, {
+      nextRun: nextRun.toISOString(),
+    })
+
+    return true
+  } catch (error) {
+    console.error(`Error scheduling scan ${scheduleId}:`, error)
+    throw error
+  }
+}
+
+export function stopScheduledJob(scheduleId: string) {
+  const job = activeJobs.get(scheduleId)
+  if (job) {
+    job.cron.stop()
+    activeJobs.delete(scheduleId)
+  }
+}
+
+export async function pauseScheduledScan(scheduleId: string) {
+  stopScheduledJob(scheduleId)
+}
+
+export async function resumeScheduledScan(scheduleId: string) {
+  const schedule = await getScheduledScanById(scheduleId)
+  if (schedule) {
+    await scheduleCodeScan(
+      scheduleId,
+      schedule.repositoryId,
+      schedule.frequency,
+      schedule.day,
+      schedule.time
+    )
+  }
+}
+
+function getCronExpression(frequency: string, day: string | null, time: string): string {
+  const [hours, minutes] = time.split(":").map(Number)
+  
+  switch (frequency) {
+    case "daily":
+      return `${minutes} ${hours} * * *`
+      
+    case "weekly": {
+      const daysOfWeek = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+      const dayNum = daysOfWeek.indexOf(day?.toLowerCase() || "")
+      return `${minutes} ${hours} * * ${dayNum}`
+    }
+    
+    case "monthly":
+      const dayOfMonth = parseInt(day || "1")
+      return `${minutes} ${hours} ${dayOfMonth} * *`
+      
+    default:
+      throw new Error(`Invalid frequency: ${frequency}`)
+  }
 }
 
 export function deleteScheduledScan(jobId: string) {
