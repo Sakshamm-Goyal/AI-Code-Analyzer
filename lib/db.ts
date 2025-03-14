@@ -271,9 +271,16 @@ export async function updateScheduledScanStatus(id: string, status: "active" | "
 }
 
 export async function deleteScheduledScan(id: string): Promise<void> {
-  const index = scheduledScans.findIndex((schedule) => schedule.id === id)
-  if (index !== -1) {
-    scheduledScans.splice(index, 1)
+  try {
+    const { error } = await supabase
+      .from('scheduled_scans')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+  } catch (error) {
+    console.error("Error deleting scheduled scan:", error);
+    throw error;
   }
 }
 
@@ -487,20 +494,6 @@ export async function updateScheduledScan(
     return schedule
   } catch (error) {
     console.error("Error updating scheduled scan:", error)
-    throw error
-  }
-}
-
-export async function deleteScheduledScan(id: string): Promise<void> {
-  try {
-    const { error } = await supabase
-      .from('scheduled_scans')
-      .delete()
-      .eq('id', id)
-
-    if (error) throw error
-  } catch (error) {
-    console.error("Error deleting scheduled scan:", error)
     throw error
   }
 }
