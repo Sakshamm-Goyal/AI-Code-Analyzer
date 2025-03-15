@@ -177,62 +177,38 @@ export async function getRepositoriesByUserId(userId: string): Promise<any[]> {
   }
 }
 
-export async function getRepositoryById(id: string): Promise<any | null> {
+export async function getRepositoryById(id: string): Promise<Repository | null> {
   try {
     console.log(`Getting repository ${id} from Supabase`);
     
-    if (!supabase) {
-      console.error("Supabase client not initialized");
-      return null;
-    }
-
     const { data, error } = await supabase
       .from('repositories')
       .select('*')
       .eq('id', id)
       .single();
-    
+
     if (error) {
-      console.error("Error querying repository:", error);
-      
-      // If the table doesn't exist, return null
-      if (error.code === 'PGRST204') {
-        console.log("The repositories table might not exist or column mismatch");
-      }
-      
-      // Don't need to throw, return null for not found
-      return null;
+      console.error("Error fetching repository:", error);
+      throw error;
     }
-    
+
     if (!data) {
-      console.log(`Repository ${id} not found in database`);
+      console.log(`Repository ${id} not found`);
       return null;
     }
-    
-    // Convert to camelCase from snake_case
-    const repository = {
-      id: data.id,
-      userId: data.user_id,
-      name: data.name,
-      fullName: data.full_name,
-      description: data.description,
-      url: data.url,
-      private: data.private,
-      stars: data.stars,
-      forks: data.forks,
-      defaultBranch: data.default_branch,
-      updatedAt: data.updated_at,
-      owner: data.owner,
-      issues: data.issues,
+
+    console.log(`Repository ${id} found: ${data.name}`);
+
+    // Convert from database format to application format
+    return {
+      ...data,
+      scanResults: data.scan_results || [],
       lastScan: data.last_scan,
-      scanResults: data.scan_results || []
+      issues: data.issues || { high: 0, medium: 0, low: 0 }
     };
-    
-    console.log(`Repository ${id} found: ${repository.name}`);
-    return repository;
   } catch (error) {
-    console.error("Error in getRepositoryById:", error);
-    return null;
+    console.error(`Error getting repository ${id}:`, error);
+    throw error;
   }
 }
 
@@ -257,114 +233,49 @@ export async function addRepository(repository: Omit<Repository, 'id'>): Promise
   return newRepository;
 }
 
-export async function updateRepository(id: string, updates: any): Promise<boolean> {
+export async function updateRepository(id: string, updates: Partial<Repository>) {
   try {
     console.log(`Updating repository ${id} in Supabase`);
-    
-    if (!supabase) {
-      console.error("Supabase client not initialized");
-      return false;
-    }
-    
-    // Convert camelCase to snake_case for database update
-    const updateData: Record<string, any> = {};
-    
-    if (updates.name) updateData.name = updates.name;
-    if (updates.fullName) updateData.full_name = updates.fullName;
-    if (updates.description !== undefined) updateData.description = updates.description;
-    if (updates.url) updateData.url = updates.url;
-    if (updates.private !== undefined) updateData.private = updates.private;
-    if (updates.stars !== undefined) updateData.stars = updates.stars;
-    if (updates.forks !== undefined) updateData.forks = updates.forks;
-    if (updates.defaultBranch) updateData.default_branch = updates.defaultBranch;
-    if (updates.updatedAt) updateData.updated_at = updates.updatedAt;
-    if (updates.owner) updateData.owner = updates.owner;
-    if (updates.issues) updateData.issues = updates.issues;
-    if (updates.lastScan) updateData.last_scan = updates.lastScan;
+    console.log("Sending update with fields:", Object.keys(updates));
+
+    // Format the updates for Supabase
+    const formattedUpdates: any = {
+      ...updates,
+      updated_at: new Date().toISOString()
+    };
+
+    // Convert scanResults to JSONB if present
     if (updates.scanResults) {
-      // Try to save scan results in repositories table
-      // This could be large, so we might want to store separately
-      try {
-        updateData.scan_results = updates.scanResults;
-      } catch (scanError) {
-        console.error("Error setting scan results, may be too large:", scanError);
-        
-        // Try saving just a summary of scan results
-        try {
-          const summaryResults = updates.scanResults.map((r: any) => ({
-            file: r.file,
-            issueCount: r.analysis?.issues?.length || 0,
-            summary: r.analysis?.summary
-          }));
-          
-          updateData.scan_results = summaryResults;
-          
-          // Also save detailed results in scan_history
-          for (const result of updates.scanResults) {
-            try {
-              await supabase
-                .from('scan_history')
-                .insert({
-                  repository_id: id,
-                  file_path: result.file,
-                  analysis: result.analysis,
-                  issues_count: result.analysis?.issues?.length || 0
-                });
-            } catch (historyError) {
-              console.error(`Failed to save history for ${result.file}:`, historyError);
-            }
-          }
-        } catch (summaryError) {
-          console.error("Error setting summary results:", summaryError);
-        }
-      }
+      formattedUpdates.scan_results = JSON.stringify(updates.scanResults);
+      delete formattedUpdates.scanResults; // Remove the camelCase version
     }
-    
-    // Add updated_at if not set explicitly
-    if (!updateData.updated_at) {
-      updateData.updated_at = new Date().toISOString();
+
+    // Convert issues to JSONB if present
+    if (updates.issues) {
+      formattedUpdates.issues = JSON.stringify(updates.issues);
     }
-    
-    console.log(`Sending update with fields: ${Object.keys(updateData).join(', ')}`);
-    
-    const { error } = await supabase
+
+    const { data, error } = await supabase
       .from('repositories')
-      .update(updateData)
-      .eq('id', id);
-    
+      .update(formattedUpdates)
+      .eq('id', id)
+      .select()
+      .single();
+
     if (error) {
       console.error("Error updating repository:", error);
-      
-      // If it's a column error, try a minimal update
-      if (error.code === 'PGRST204') {
-        console.log("Trying minimal update with just issues and last_scan");
-        
-        const minimalUpdate = {
-          last_scan: updates.lastScan,
-          issues: updates.issues
-        };
-        
-        const { error: minimalError } = await supabase
-          .from('repositories')
-          .update(minimalUpdate)
-          .eq('id', id);
-        
-        if (minimalError) {
-          console.error("Error with minimal update:", minimalError);
-          return false;
-        }
-        
-        return true;
-      }
-      
-      return false;
+      throw error;
     }
-    
-    console.log(`Repository ${id} updated successfully`);
-    return true;
+
+    // Convert the response back to camelCase for our application
+    return {
+      ...data,
+      scanResults: data.scan_results || [],
+      lastScan: data.last_scan,
+    };
   } catch (error) {
-    console.error("Error in updateRepository:", error);
-    return false;
+    console.error(`Error updating repository ${id}:`, error);
+    throw error;
   }
 }
 

@@ -30,7 +30,8 @@ CREATE TABLE repositories (
   owner TEXT,
   issues JSONB DEFAULT '{"high": 0, "medium": 0, "low": 0}'::jsonb,
   last_scan TIMESTAMP WITH TIME ZONE,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  scan_results JSONB DEFAULT '[]'::jsonb
 );
 
 -- Create repositories_scan table
@@ -57,4 +58,7 @@ CREATE TABLE scan_history (
 -- Create indexes for performance
 CREATE INDEX repositories_user_id_idx ON repositories(user_id);
 CREATE INDEX scan_history_repository_id_idx ON scan_history(repository_id);
-CREATE INDEX repositories_scan_repository_id_idx ON repositories_scan(repository_id); 
+CREATE INDEX repositories_scan_repository_id_idx ON repositories_scan(repository_id);
+
+-- Add index for faster lookups
+CREATE INDEX IF NOT EXISTS idx_repositories_scan_repository_id ON repositories_scan(repository_id); 

@@ -30,30 +30,34 @@ export default function ScanStatusPage() {
         method: "GET",
         headers: {
           "Accept": "application/json",
-          "Cache-Control": "no-store"
         }
       });
       
-      if (!response.ok) {
+      if (!response.ok) { 
         const errorData = await response.json();
+        // Stop polling if we get certain errors
+        if (response.status === 404 || response.status === 403) {
+          setShouldPoll(false);
+        }
         throw new Error(errorData.error || "Failed to fetch scan status");
       }
       
       const data = await response.json();
-      console.log("Scan status:", data);
       setScanStatus(data);
       
-      // Stop polling if scan is completed or failed
+      // Stop polling if scan is complete or failed
       if (data.status === 'completed' || data.status === 'failed') {
-        console.log(`Scan ${data.status}. Stopping status polling.`);
         setShouldPoll(false);
+        if (data.status === 'failed') {
+          setError(data.error || 'Scan failed');
+        }
       }
+      
+      setIsLoading(false);
     } catch (error) {
       console.error("Error fetching scan status:", error);
       setError(error instanceof Error ? error.message : "Failed to fetch scan status");
-      // Stop polling on error
-      setShouldPoll(false);
-    } finally {
+      setShouldPoll(false); // Stop polling on error
       setIsLoading(false);
     }
   }, [params.id, shouldPoll]);
