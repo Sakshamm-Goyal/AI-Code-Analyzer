@@ -1,87 +1,164 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { auth } from "@clerk/nextjs";
-import { getRepositoryById, updateRepository, deleteRepository } from "@/lib/db";
-import { parseGitHubUrl, getRepository, createGitHubClient } from "@/lib/github";
+import { auth, currentUser } from "@clerk/nextjs";
+import { getRepositoryById, updateRepository, deleteRepository, createRepository } from "@/lib/db";
+import { parseGitHubUrl } from "@/lib/github";
 import { Octokit } from "@octokit/rest";
+import { clerkClient } from "@clerk/nextjs";
 
 export async function GET(
-  req: NextRequest,
+  request: Request,
   { params }: { params: { id: string } }
 ) {
   try {
-    // Await the auth check
+    // IMPORTANT: Must await auth() in App Router
     const { userId } = await auth();
-    if (!userId) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
 
-    // Validate repository ID
-    const repoId = parseInt(params.id);
-    if (!repoId || isNaN(repoId)) {
+    if (!userId) {
       return NextResponse.json(
-        { error: "Invalid repository ID" },
-        { status: 400 }
+        { error: "Unauthorized" },
+        { status: 401 }
       );
     }
 
-    // Create GitHub client
-    const client = await createGitHubClient();
-    
+    // Safely access params.id after auth() is awaited
+    const repoId = params.id;
+    console.log(`Getting repository ${repoId} for user ${userId}`);
+
+    // Attempt to fetch directly from GitHub first
     try {
-      // Use the correct Octokit request format - method and path combined as a single string
-      const { data: repo } = await client.request('GET /repositories/{repository_id}', {
-        repository_id: repoId
-      });
-
-      // Format the response
-      const dbRepo = await getRepositoryById(repoId);
-      const repository = {
-        id: repo.id,
-        name: repo.name,
-        fullName: repo.full_name,
-        description: repo.description,
-        url: repo.html_url,
-        private: repo.private,
-        stars: repo.stargazers_count,
-        forks: repo.forks_count,
-        defaultBranch: repo.default_branch,
-        updatedAt: repo.updated_at,
-        owner: repo.owner.login,
-        lastScan: dbRepo?.lastScan || null,
-        issues: dbRepo?.issues || { high: 0, medium: 0, low: 0 },
-        scanResults: dbRepo?.scanResults || [],
-      };
-
-      return NextResponse.json({ repository });
-    } catch (apiError: any) {
-      console.error("GitHub API Error:", apiError);
+      // Get GitHub token from user metadata
+      const user = await clerkClient.users.getUser(userId);
       
-      // Handle specific GitHub API errors
-      if (apiError.status === 404) {
-        return NextResponse.json(
-          { error: "Repository not found" },
-          { status: 404 }
-        );
+      if (user.publicMetadata.githubAccessToken) {
+        const token = user.publicMetadata.githubAccessToken as string;
+        const client = new Octokit({ auth: token });
+        
+        try {
+          // Try to get the repository by ID from GitHub
+          const { data: repo } = await client.request('GET /repositories/{repository_id}', {
+            repository_id: parseInt(repoId)
+          });
+          
+          if (repo) {
+            console.log(`Found repository directly on GitHub: ${repo.full_name}`);
+            
+            // Return formatted repository without saving to database
+            return NextResponse.json({ 
+              repository: {
+                id: repo.id.toString(),
+                name: repo.name,
+                fullName: repo.full_name,
+                description: repo.description || '',
+                url: repo.html_url,
+                private: repo.private,
+                stars: repo.stargazers_count,
+                forks: repo.forks_count,
+                defaultBranch: repo.default_branch,
+                updatedAt: repo.updated_at,
+                owner: repo.owner.login,
+                userId: userId,
+                issues: { high: 0, medium: 0, low: 0 },
+                scanResults: [],
+                _sourceType: 'github_direct'
+              }
+            });
+          }
+        } catch (githubError) {
+          console.error("Error fetching repository from GitHub by ID:", githubError);
+          
+          // Try fetching user's repositories and find by ID
+          try {
+            const { data: repos } = await client.repos.listForAuthenticatedUser({
+              per_page: 100
+            });
+            
+            const matchingRepo = repos.find(r => r.id.toString() === repoId);
+            
+            if (matchingRepo) {
+              console.log(`Found repository in user's GitHub repos: ${matchingRepo.full_name}`);
+              
+              // Return formatted repository without saving to database
+              return NextResponse.json({ 
+                repository: {
+                  id: matchingRepo.id.toString(),
+                  name: matchingRepo.name,
+                  fullName: matchingRepo.full_name,
+                  description: matchingRepo.description || '',
+                  url: matchingRepo.html_url,
+                  private: matchingRepo.private,
+                  stars: matchingRepo.stargazers_count,
+                  forks: matchingRepo.forks_count,
+                  defaultBranch: matchingRepo.default_branch,
+                  updatedAt: matchingRepo.updated_at,
+                  owner: matchingRepo.owner.login,
+                  userId: userId,
+                  issues: { high: 0, medium: 0, low: 0 },
+                  scanResults: [],
+                  _sourceType: 'github_list'
+                }
+              });
+            }
+          } catch (listError) {
+            console.error("Error listing user repositories:", listError);
+          }
+        }
       }
-      
-      if (apiError.status === 401) {
-        return NextResponse.json(
-          { error: "GitHub authentication failed" },
-          { status: 401 }
-        );
-      }
-
-      throw apiError;
+    } catch (tokenError) {
+      console.error("Error getting GitHub token:", tokenError);
     }
-  } catch (error) {
-    console.error("Error fetching repository:", error);
+    
+    // Fallback to database if GitHub fetch fails
+    try {
+      // Try to get from our database
+      const repository = await getRepositoryById(repoId);
+      
+      if (repository) {
+        if (repository.userId !== userId) {
+          return NextResponse.json(
+            { error: "Unauthorized" },
+            { status: 403 }
+          );
+        }
+        
+        return NextResponse.json({ 
+          repository: {
+            ...repository,
+            scanResults: repository.scanResults || []
+          }
+        });
+      }
+    } catch (dbError) {
+      console.error("Database error:", dbError);
+    }
+    
+    // If we get here, we couldn't find the repository
     return NextResponse.json(
-      { 
-        error: error instanceof Error ? error.message : "Failed to fetch repository",
-        details: process.env.NODE_ENV === 'development' ? error : undefined
-      },
+      { error: "Repository not found" },
+      { status: 404 }
+    );
+  } catch (error) {
+    console.error("Error getting repository:", error);
+    return NextResponse.json(
+      { error: "Failed to get repository" },
       { status: 500 }
     );
+  }
+}
+
+// Helper function to get GitHub token safely
+async function getGitHubToken(userId: string): Promise<string | null> {
+  try {
+    // Get token from Clerk metadata
+    const { data, error } = await fetch('/api/user/github-token').then(res => res.json());
+    
+    if (error) {
+      throw new Error(error);
+    }
+    
+    return data?.token || null;
+  } catch (error) {
+    console.error("Error getting GitHub token:", error);
+    return null;
   }
 }
 
@@ -90,13 +167,16 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
+    // IMPORTANT: Must await auth() in App Router
     const { userId } = await auth();
+    
     if (!userId) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const repoId = parseInt(params.id);
-    if (!repoId || isNaN(repoId)) {
+    // Make sure we have a valid ID
+    const repoId = params.id;
+    if (!repoId) {
       return NextResponse.json(
         { error: "Invalid repository ID" },
         { status: 400 }
@@ -116,14 +196,7 @@ export async function DELETE(
       return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
     }
 
-    const deleted = await deleteRepository(repoId);
-
-    if (!deleted) {
-      return NextResponse.json(
-        { error: "Failed to delete repository" },
-        { status: 500 }
-      );
-    }
+    await deleteRepository(repoId);
 
     return NextResponse.json({ success: true });
   } catch (error) {

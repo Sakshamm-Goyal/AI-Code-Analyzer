@@ -4,7 +4,8 @@ import { exchangeCodeForToken } from "@/lib/github-oauth"
 
 export async function GET(req: NextRequest) {
   try {
-    const { userId } = auth()
+    // IMPORTANT: Must await auth() in App Router
+    const { userId } = await auth()
     if (!userId) {
       return NextResponse.redirect(new URL("/sign-in", req.url))
     }
@@ -17,8 +18,12 @@ export async function GET(req: NextRequest) {
       throw new Error("No code provided")
     }
 
+    console.log(`Exchanging GitHub code for token for user ${userId}`);
+    
     // Exchange the code for an access token
     const accessToken = await exchangeCodeForToken(code)
+    
+    console.log(`Successfully obtained GitHub token, storing in user metadata`);
 
     // Store the token in Clerk user metadata
     await clerkClient.users.updateUserMetadata(userId, {
@@ -27,6 +32,8 @@ export async function GET(req: NextRequest) {
         githubConnectedAt: new Date().toISOString(),
       },
     })
+    
+    console.log(`GitHub token stored in user metadata, redirecting to success page`);
 
     // Redirect back to the repositories page with success message
     return NextResponse.redirect(

@@ -1,158 +1,278 @@
 "use client"
 
-import type React from "react"
-
-import { useState } from "react"
+import { useState, useEffect } from "react"
+import { useForm } from "react-hook-form"
+import { zodResolver } from "@hookform/resolvers/zod"
+import * as z from "zod"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
+import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Input } from "@/components/ui/input"
+import { Button } from "@/components/ui/button"
 import { Loader2 } from "lucide-react"
+import { useToast } from "@/components/ui/use-toast"
 
-export function ScheduleScanForm() {
-  const [repository, setRepository] = useState("")
-  const [frequency, setFrequency] = useState("")
-  const [day, setDay] = useState("")
-  const [time, setTime] = useState("")
-  const [isSubmitting, setIsSubmitting] = useState(false)
+const scheduleFormSchema = z.object({
+  repositoryId: z.string().min(1, "Repository is required"),
+  frequency: z.enum(["daily", "weekly", "monthly"]),
+  day: z.string().optional(),
+  time: z.string().regex(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/, "Invalid time format"),
+  analysisTypes: z.array(z.string()).min(1, "Select at least one analysis type"),
+})
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
+type ScheduleFormValues = z.infer<typeof scheduleFormSchema>
 
-    if (!repository || !frequency || !time) return
-    if (frequency !== "daily" && !day) return
+interface Repository {
+  id: string
+  name: string
+  fullName: string
+}
 
-    setIsSubmitting(true)
+export interface ScheduleScanFormProps {
+  onSuccess?: () => Promise<void> | void
+}
 
-    // Simulate API call
-    setTimeout(() => {
-      setIsSubmitting(false)
-      // Reset form
-      setRepository("")
-      setFrequency("")
-      setDay("")
-      setTime("")
-    }, 2000)
+export function ScheduleScanForm({ onSuccess }: ScheduleScanFormProps) {
+  const { toast } = useToast()
+  const [repositories, setRepositories] = useState<Repository[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+
+  const form = useForm<ScheduleFormValues>({
+    resolver: zodResolver(scheduleFormSchema),
+    defaultValues: {
+      frequency: "daily",
+      time: "09:00",
+      analysisTypes: ["security"],
+    },
+  })
+
+  useEffect(() => {
+    fetchRepositories()
+  }, [])
+
+  const fetchRepositories = async () => {
+    try {
+      const response = await fetch("/api/github/repositories")
+      if (!response.ok) throw new Error("Failed to fetch repositories")
+      const data = await response.json()
+      setRepositories(data.repositories)
+    } catch (error) {
+      console.error("Error fetching repositories:", error)
+      toast({
+        title: "Error",
+        description: "Failed to load repositories",
+        variant: "destructive",
+      })
+    } finally {
+      setIsLoading(false)
+    }
   }
 
-  // Mock repositories
-  const repositories = [
-    { id: "repo-1", name: "frontend-app" },
-    { id: "repo-2", name: "backend-api" },
-    { id: "repo-3", name: "mobile-app" },
+  const onSubmit = async (values: ScheduleFormValues) => {
+    try {
+      const response = await fetch("/api/scheduled", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(values),
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.error || "Failed to create schedule")
+      }
+
+      toast({
+        title: "Success",
+        description: "Schedule created successfully",
+      })
+
+      form.reset()
+      onSuccess?.()
+    } catch (error) {
+      console.error("Error creating schedule:", error)
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to create schedule",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const analysisTypes = [
+    { id: "security", label: "Security" },
+    { id: "quality", label: "Code Quality" },
+    { id: "performance", label: "Performance" },
+    { id: "best-practices", label: "Best Practices" },
   ]
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Create Scheduled Scan</CardTitle>
-        <CardDescription>Set up automated code scans for your repositories</CardDescription>
+        <CardTitle>Create Schedule</CardTitle>
+        <CardDescription>Set up automated code scans for your repository</CardDescription>
       </CardHeader>
       <CardContent>
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-2">
-            <label className="text-sm font-medium leading-none">Repository</label>
-            <Select value={repository} onValueChange={setRepository}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select repository" />
-              </SelectTrigger>
-              <SelectContent>
-                {repositories.map((repo) => (
-                  <SelectItem key={repo.id} value={repo.id}>
-                    {repo.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+        <Form {...form}>
+          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+            <FormField
+              control={form.control}
+              name="repositoryId"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Repository</FormLabel>
+                  <Select
+                    disabled={isLoading}
+                    onValueChange={field.onChange}
+                    value={field.value}
+                  >
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select a repository" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {repositories.map((repo) => (
+                        <SelectItem key={repo.id} value={repo.id}>
+                          {repo.fullName}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
-          <div className="space-y-2">
-            <label className="text-sm font-medium leading-none">Frequency</label>
-            <Select value={frequency} onValueChange={setFrequency}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select frequency" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="daily">Daily</SelectItem>
-                <SelectItem value="weekly">Weekly</SelectItem>
-                <SelectItem value="monthly">Monthly</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+            <FormField
+              control={form.control}
+              name="frequency"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Frequency</FormLabel>
+                  <Select
+                    onValueChange={field.onChange}
+                    value={field.value}
+                  >
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value="daily">Daily</SelectItem>
+                      <SelectItem value="weekly">Weekly</SelectItem>
+                      <SelectItem value="monthly">Monthly</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
-          {frequency === "weekly" && (
-            <div className="space-y-2">
-              <label className="text-sm font-medium leading-none">Day of Week</label>
-              <Select value={day} onValueChange={setDay}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select day" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="Monday">Monday</SelectItem>
-                  <SelectItem value="Tuesday">Tuesday</SelectItem>
-                  <SelectItem value="Wednesday">Wednesday</SelectItem>
-                  <SelectItem value="Thursday">Thursday</SelectItem>
-                  <SelectItem value="Friday">Friday</SelectItem>
-                  <SelectItem value="Saturday">Saturday</SelectItem>
-                  <SelectItem value="Sunday">Sunday</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-
-          {frequency === "monthly" && (
-            <div className="space-y-2">
-              <label className="text-sm font-medium leading-none">Day of Month</label>
-              <Select value={day} onValueChange={setDay}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select day" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1st">1st</SelectItem>
-                  <SelectItem value="15th">15th</SelectItem>
-                  <SelectItem value="last">Last day</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-
-          <div className="space-y-2">
-            <label className="text-sm font-medium leading-none">Time (UTC)</label>
-            <Input type="time" value={time} onChange={(e) => setTime(e.target.value)} />
-          </div>
-
-          <div className="space-y-2">
-            <label className="text-sm font-medium leading-none">Analysis Type</label>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <Button type="button" variant="outline" className="rounded-full">
-                Security
-              </Button>
-              <Button type="button" variant="outline" className="rounded-full">
-                Code Quality
-              </Button>
-              <Button type="button" variant="outline" className="rounded-full">
-                Performance
-              </Button>
-              <Button type="button" variant="outline" className="rounded-full">
-                Best Practices
-              </Button>
-            </div>
-          </div>
-
-          <Button
-            type="submit"
-            disabled={!repository || !frequency || !time || (frequency !== "daily" && !day) || isSubmitting}
-          >
-            {isSubmitting ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Creating Schedule...
-              </>
-            ) : (
-              "Create Schedule"
+            {form.watch("frequency") !== "daily" && (
+              <FormField
+                control={form.control}
+                name="day"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Day</FormLabel>
+                    <Select
+                      onValueChange={field.onChange}
+                      value={field.value}
+                    >
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue placeholder={
+                            form.watch("frequency") === "weekly"
+                              ? "Select day of week"
+                              : "Select day of month"
+                          } />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        {form.watch("frequency") === "weekly"
+                          ? ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day) => (
+                              <SelectItem key={day} value={day.toLowerCase()}>
+                                {day}
+                              </SelectItem>
+                            ))
+                          : Array.from({ length: 28 }, (_, i) => (
+                              <SelectItem key={i + 1} value={String(i + 1)}>
+                                {i + 1}
+                              </SelectItem>
+                            ))
+                        }
+                      </SelectContent>
+                    </Select>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
             )}
-          </Button>
-        </form>
+
+            <FormField
+              control={form.control}
+              name="time"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Time</FormLabel>
+                  <FormControl>
+                    <Input type="time" {...field} />
+                  </FormControl>
+                  <FormDescription>
+                    All times are in your local timezone
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="analysisTypes"
+              render={() => (
+                <FormItem>
+                  <FormLabel>Analysis Types</FormLabel>
+                  <div className="flex flex-wrap gap-2">
+                    {analysisTypes.map((type) => (
+                      <Button
+                        key={type.id}
+                        type="button"
+                        variant={form.watch("analysisTypes")?.includes(type.id) ? "default" : "outline"}
+                        className="rounded-full"
+                        onClick={() => {
+                          const current = form.watch("analysisTypes") || []
+                          const updated = current.includes(type.id)
+                            ? current.filter((t) => t !== type.id)
+                            : [...current, type.id]
+                          form.setValue("analysisTypes", updated)
+                        }}
+                      >
+                        {type.label}
+                      </Button>
+                    ))}
+                  </div>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <Button
+              type="submit"
+              disabled={!form.formState.isValid || form.formState.isSubmitting}
+              className="w-full"
+            >
+              {form.formState.isSubmitting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Creating Schedule...
+                </>
+              ) : (
+                "Create Schedule"
+              )}
+            </Button>
+          </form>
+        </Form>
       </CardContent>
     </Card>
   )
