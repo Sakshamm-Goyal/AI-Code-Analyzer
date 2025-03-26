@@ -396,7 +396,7 @@ export default function RepositoriesPage() {
               {isConnecting ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Connecting...
+                  <span className="text-foreground">Connecting...</span>
                 </>
               ) : (
                 'Connect'

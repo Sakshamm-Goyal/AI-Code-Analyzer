@@ -33,6 +33,24 @@ const countIssuesByFile = (fileResult: any) => {
   return issues;
 };
 
+// Add a new function to aggregate issues across all files
+const aggregateIssuesFromFiles = (fileResults: any[]) => {
+  const aggregatedIssues = { high: 0, medium: 0, low: 0 };
+  
+  if (!fileResults || !Array.isArray(fileResults)) {
+    return aggregatedIssues;
+  }
+  
+  fileResults.forEach(fileResult => {
+    const fileIssues = countIssuesByFile(fileResult);
+    aggregatedIssues.high += fileIssues.high;
+    aggregatedIssues.medium += fileIssues.medium;
+    aggregatedIssues.low += fileIssues.low;
+  });
+  
+  return aggregatedIssues;
+};
+
 // Helper function to estimate time remaining based on current progress
 const estimateTimeRemaining = (processedFiles: number, totalFiles: number): string => {
   // If no files processed yet, we can't estimate
@@ -85,10 +103,13 @@ export default function ScanStatusPage() {
           if (parsedScan.fileResults) {
             console.log(`Found multi-file analysis with ${parsedScan.fileResults.length} files`);
             
+            // Calculate aggregated issues from all file results
+            const aggregatedIssues = aggregateIssuesFromFiles(parsedScan.fileResults);
+            
             setScanStatus({
               status: parsedScan.status,
               progress: parsedScan.progress,
-              issues: parsedScan.aggregatedIssues || { high: 0, medium: 0, low: 0 },
+              issues: aggregatedIssues, // Use our calculated aggregated issues
               processedFiles: parsedScan.processedFiles || 0,
               totalFiles: parsedScan.totalFiles || 0,
               fileResults: parsedScan.fileResults,
@@ -284,7 +305,17 @@ export default function ScanStatusPage() {
         }
         
         const data = await response.json();
-      setScanStatus(data);
+        
+        // Check if we have fileResults and calculate aggregated issues if needed
+        if (data.fileResults && Array.isArray(data.fileResults)) {
+          // Use our aggregation function to calculate accurate issue counts
+          const aggregatedIssues = aggregateIssuesFromFiles(data.fileResults);
+          
+          // Update the issues with our aggregated counts
+          data.issues = aggregatedIssues;
+        }
+        
+        setScanStatus(data);
       
       // Stop polling if scan is complete or failed
       if (data.status === 'completed' || data.status === 'failed') {
@@ -360,6 +391,24 @@ export default function ScanStatusPage() {
               parsedScan.fileResults.length >= 5) { // Only if we have at least 5 results
             setShowPartialResults(true);
           }
+          
+          // If we already have scan status but issues might be incorrect, recompute them
+          if (scanStatus && scanStatus.fileResults && scanStatus.fileResults.length > 0) {
+            // Recalculate issue counts just to be safe
+            const recalculatedIssues = aggregateIssuesFromFiles(scanStatus.fileResults);
+            
+            // If the counts are different than what's in scanStatus, update them
+            if (recalculatedIssues.high !== scanStatus.issues?.high || 
+                recalculatedIssues.medium !== scanStatus.issues?.medium ||
+                recalculatedIssues.low !== scanStatus.issues?.low) {
+              console.log("Updating issue counts based on recalculation", 
+                          { old: scanStatus.issues, new: recalculatedIssues });
+              setScanStatus({
+                ...scanStatus,
+                issues: recalculatedIssues
+              });
+            }
+          }
         } catch (e) {
           console.error("Error checking stored scan:", e);
         }
@@ -369,7 +418,7 @@ export default function ScanStatusPage() {
     return () => {
       if (intervalId) clearInterval(intervalId);
     };
-  }, [fetchScanStatus, shouldPoll, params?.id]);
+  }, [fetchScanStatus, shouldPoll, params?.id, scanStatus]);
 
   const handleStartNewScan = async () => {
     try {
@@ -773,44 +822,55 @@ export default function ScanStatusPage() {
                 </div>
               )}
           
+          {/* Show file results if scan is completed or if partial results are requested */}
           {(scanStatus?.status === 'completed' || (showPartialResults && scanStatus?.processedFiles > 0)) && 
             scanStatus?.fileResults && scanStatus.fileResults.length > 0 && renderAnalysisDetail()}
           
-          {scanStatus?.status === 'processing' && scanStatus.processedFiles > 0 && !showPartialResults && (
+          {/* Always show View Analyzed Files button when there are analyzed files but not showing partial results yet */}
+          {scanStatus?.fileResults && scanStatus.fileResults.length > 0 && !showPartialResults && (
             <div className="mt-6">
               <Button onClick={handleShowPartialResults} variant="outline">
                 <FileCode className="mr-2 h-4 w-4" />
-                View Analyzed Files ({scanStatus.processedFiles})
+                View Analyzed Files ({scanStatus.fileResults.length})
               </Button>
             </div>
           )}
             </CardContent>
           </Card>
           
-          {scanStatus?.status === 'completed' && scanStatus?.issues && (
+          {/* Show Issues Found card if scan is completed or partial results with analyzed files are available */}
+          {(scanStatus?.status === 'completed' || (showPartialResults && scanStatus?.fileResults?.length > 0)) && (
             <Card>
               <CardHeader>
                 <CardTitle>Issues Found</CardTitle>
                 <CardDescription>Summary of issues detected across all files</CardDescription>
               </CardHeader>
               <CardContent>
-                <div className="grid grid-cols-3 gap-4">
-                  <div className="flex flex-col items-center p-4 bg-red-50 rounded-lg">
-                    <AlertCircle className="h-8 w-8 text-red-500 mb-2" />
-                    <span className="text-2xl font-bold">{scanStatus.issues.high}</span>
-                    <span className="text-sm text-muted-foreground">High Severity</span>
-                  </div>
-                  <div className="flex flex-col items-center p-4 bg-amber-50 rounded-lg">
-                    <AlertTriangle className="h-8 w-8 text-amber-500 mb-2" />
-                    <span className="text-2xl font-bold">{scanStatus.issues.medium}</span>
-                    <span className="text-sm text-muted-foreground">Medium Severity</span>
-                  </div>
-                  <div className="flex flex-col items-center p-4 bg-blue-50 rounded-lg">
-                    <AlertCircle className="h-8 w-8 text-blue-500 mb-2" />
-                    <span className="text-2xl font-bold">{scanStatus.issues.low}</span>
-                    <span className="text-sm text-muted-foreground">Low Severity</span>
-                  </div>
-                </div>
+                {/* Calculate aggregated issues if not already set */}
+                {(() => {
+                  // Make sure we have the most up-to-date aggregated issues
+                  const displayIssues = aggregateIssuesFromFiles(scanStatus.fileResults || []);
+                  
+                  return (
+                    <div className="grid grid-cols-3 gap-4">
+                      <div className="flex flex-col items-center p-4 bg-red-50 rounded-lg">
+                        <AlertCircle className="h-8 w-8 text-red-500 mb-2" />
+                        <span className="text-2xl font-bold">{displayIssues.high}</span>
+                        <span className="text-sm text-muted-foreground">High Severity</span>
+                      </div>
+                      <div className="flex flex-col items-center p-4 bg-amber-50 rounded-lg">
+                        <AlertTriangle className="h-8 w-8 text-amber-500 mb-2" />
+                        <span className="text-2xl font-bold">{displayIssues.medium}</span>
+                        <span className="text-sm text-muted-foreground">Medium Severity</span>
+                      </div>
+                      <div className="flex flex-col items-center p-4 bg-blue-50 rounded-lg">
+                        <AlertCircle className="h-8 w-8 text-blue-500 mb-2" />
+                        <span className="text-2xl font-bold">{displayIssues.low}</span>
+                        <span className="text-sm text-muted-foreground">Low Severity</span>
+                      </div>
+                    </div>
+                  );
+                })()}
                 
                 {scanStatus.totalFiles > 1 && (
                   <div className="mt-4 border-t pt-4">

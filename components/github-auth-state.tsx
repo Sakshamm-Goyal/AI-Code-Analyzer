@@ -68,7 +68,7 @@ export default function GitHubAuthState() {
 
   if (isConnected === true) {
     return (
-      <Alert className="bg-green-50 border-green-300 mb-6">
+      <Alert className="bg-indigo-50 dark:bg-indigo-900/30 border-indigo-200 dark:border-indigo-800/50 mb-6 text-indigo-700 dark:text-indigo-200">
         <AlertTitle>GitHub Connected</AlertTitle>
         <AlertDescription>
           Your GitHub account is connected and working correctly.
@@ -78,13 +78,13 @@ export default function GitHubAuthState() {
   }
 
   return (
-    <Alert className="bg-blue-50 border-blue-300 mb-6">
+    <Alert className="bg-blue-50 dark:bg-blue-950 border-blue-300 dark:border-blue-800 mb-6 text-blue-800 dark:text-blue-300">
       <div className="flex justify-between items-center">
         <div>
           <AlertTitle>Connect GitHub</AlertTitle>
           <AlertDescription>
             {error ? (
-              <span className="text-red-500">{error}</span>
+              <span className="text-red-500 dark:text-red-400">{error}</span>
             ) : (
               "Connect your GitHub account to analyze repositories."
             )}
@@ -98,7 +98,7 @@ export default function GitHubAuthState() {
           {isLoading ? (
             <>
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              Connecting...
+              <span className="text-foreground">Connecting...</span>
             </>
           ) : (
             "Connect GitHub"
