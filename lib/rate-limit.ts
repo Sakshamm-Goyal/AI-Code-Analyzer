@@ -37,10 +37,15 @@ class TokenBucket {
     
     this.refill();
     
-    // If we have less than 10% of our capacity, slow down dramatically
-    if (this.tokens < this.capacity * 0.1) {
+    // If we have less than 20% of our capacity, slow down dramatically to avoid hitting limits
+    if (this.tokens < this.capacity * 0.2) {
       console.log(`Rate limit approaching: ${Math.floor(this.tokens)} tokens remaining. Adding delay...`);
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 seconds instead of 2
+    }
+    // If we have less than 50% of our capacity, add a smaller delay
+    else if (this.tokens < this.capacity * 0.5) {
+      console.log(`Rate limit caution: ${Math.floor(this.tokens)} tokens remaining. Adding short delay...`);
+      await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
     }
     
     if (this.tokens >= 1) {
@@ -75,7 +80,7 @@ class TokenBucket {
 }
 
 // Create rate limiters based on Gemini's limits
-// 15 requests per minute (RPM)
+// 15 requests per minute (RPM) - using the full available limit for Gemini 2.0 Flash
 const geminiMinuteLimiter = new TokenBucket(15, 15/60);
 
 // 1,000,000 tokens per minute (TPM)

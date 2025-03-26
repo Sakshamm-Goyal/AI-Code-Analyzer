@@ -112,7 +112,7 @@ export async function GET(
 
     // First check if repository exists and user has access
     const repository = await getRepositoryById(id);
-    if (!repository) {
+      if (!repository) {
       return NextResponse.json({ error: "Repository not found" }, { status: 404 });
     }
 
@@ -136,7 +136,7 @@ export async function GET(
       return NextResponse.json({ error: "No active scan found" }, { status: 404 });
     }
 
-    return NextResponse.json({
+        return NextResponse.json({
       status: scanJob.status,
       progress: scanJob.progress,
       issues: scanJob.issues || { high: 0, medium: 0, low: 0 },
@@ -167,13 +167,13 @@ export async function POST(
     }
 
     // Initialize scan job
-    const job: ScanJob = {
-      repositoryId: id,
+      const job: ScanJob = {
+        repositoryId: id,
       userId: userId,
       status: 'processing',
-      progress: 0,
-      startTime: new Date(),
-      issues: { high: 0, medium: 0, low: 0 },
+        progress: 0,
+        startTime: new Date(),
+        issues: { high: 0, medium: 0, low: 0 },
       processedFiles: 0,
       totalFiles: 0
     };
@@ -183,8 +183,8 @@ export async function POST(
     // Start scan process in background
     processScan(job).catch(error => {
       console.error("Scan process failed:", error);
-      job.status = 'failed';
-      job.error = error instanceof Error ? error.message : String(error);
+        job.status = 'failed';
+        job.error = error instanceof Error ? error.message : String(error);
       scanQueue.set(id, { ...job });
     });
 
@@ -201,7 +201,7 @@ async function processScan(job: ScanJob) {
     // Validate repository exists before starting scan
     const repository = await getRepositoryById(job.repositoryId);
     if (!repository) {
-      throw new Error("Repository not found");
+          throw new Error("Repository not found");
     }
 
     // Rest of your scan process...
